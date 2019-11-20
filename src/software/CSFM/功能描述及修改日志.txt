@@ -1,0 +1,12 @@
+﻿openMVG的功能集成
+1、搭建SFM功能集成的基本框架
+
+##################################################
+2018.11.25 22：35 完成openMVG原始模块sfm_init_ImageListing，computeFeatures，computeMatches，
+globalSfM，incrementalSfM,incrementalSfM2的集成，统一成新的openMVG_main_CSFM
+
+2018.11.25 23：35 修正默认线程数=0时，openMP不能完全利用内存的问题
+2018.11.26 08：30 添加了recordfile，用于后面用户自主记录程序运行情况。
+
+
+

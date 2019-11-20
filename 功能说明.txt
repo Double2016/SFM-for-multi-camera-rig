@@ -1,0 +1,5 @@
+此文件包用于fatCSFM，在vs2015的测试及移植
+
+###########################
+修改cmakelists.txt，只保留software/fatCSFM
+在\src\third_party添加已编译好的glew,SIFTGPU,CGAL（其中boost提供安装包，按默认路径安装即可）
