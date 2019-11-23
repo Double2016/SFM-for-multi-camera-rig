@@ -1083,6 +1083,12 @@ int CSFM::computeMCMatches()
 			std::cout << "Task done in (s): " << timer.elapsed() << std::endl;
 			
 	    }
+		//-- export Adjacency matrix
+		std::cout << "\n Export Adjacency Matrix of the pairwise's geometric matches"
+			<< std::endl;
+		PairWiseMatchingToAdjacencyMatrixSVG_MC(vec_fileNames.size(),Group_camera_num,
+			map_GeometricMatches,
+			stlplus::create_filespec(sOutputDir, "GeometricAdjacencyMatrix", "svg"));
 		//-- export view pair graph once geometric filter have been done
 		{
 			std::set<IndexT> set_ViewIds;
@@ -1100,7 +1106,7 @@ int CSFM::computeMCMatches()
 
 int CSFM::globalMCSfM()
 {
-	std::ofstream out(recordfile, ios::app);
+	std::ofstream record_out(recordfile, ios::app);
 	if (iRotationAveragingMethod < ROTATION_AVERAGING_L1 ||
 		iRotationAveragingMethod > ROTATION_AVERAGING_L2) {
 		std::cout << "\n Rotation averaging method is invalid" << std::endl;
@@ -1232,15 +1238,16 @@ int CSFM::globalMCSfM()
 		//3.Integrate the single sfm_data scene poses and structure into the global sfm_data scene poses
 		for (auto & pose_it : sfmEngine.Get_SfM_Data().GetPoses())
 			sfm_data.poses[pose_it.first] = pose_it.second;
-		std::cout << "After Cam_" << to_string(cam) << " global sfm, poses size:" << sfm_data.poses.size() << std::endl;
+		record_out << "After Cam_" << to_string(cam) << " incremental_v2 sfm, poses size:" << sfmEngine.Get_SfM_Data().poses.size() << "/" << sfm_data.poses.size() << std::endl;
 
 		for (auto & landmark_it : sfmEngine.Get_SfM_Data().GetLandmarks())
 		{
 			int landmark_id = sfm_data.structure.size();
 			Landmark landmark = landmark_it.second;
-			sfm_data.structure[landmark_id]=landmark;
+			sfm_data.structure[landmark_id] = landmark;
 		}
-		std::cout << "After Cam_" << to_string(cam) << " global sfm, structure size:" << sfm_data.structure.size() << std::endl;
+		record_out << "After Cam_" << to_string(cam) << " incremental_v2 sfm, structure size:" << sfmEngine.Get_SfM_Data().structure.size() << "/" << sfm_data.structure.size() << std::endl;
+
 	}
 
 	Save(sfm_data,
@@ -1252,7 +1259,7 @@ int CSFM::globalMCSfM()
 
 int CSFM::incrementalMCSfM2()
 {
-	std::ofstream out(recordfile, ios::app);
+	std::ofstream record_out(recordfile, ios::app);
 	std::cout << "Sequential/Incremental reconstruction (Engine 2)" << std::endl
 		<< std::endl;
 
@@ -1369,7 +1376,7 @@ int CSFM::incrementalMCSfM2()
 			scene_initializer.get(),
 			sfm_data_single,
 			sOutputDir,
-			stlplus::create_filespec(sOutputDir, "Reconstruction_Report.html"));
+			stlplus::create_filespec(sOutputDir, "Reconstruction_Report_cam" + to_string(cam)+".html"));
 
 		// Configure the features_provider & the matches_provider
 		sfmEngine.SetFeaturesProvider(feats_provider.get());
@@ -1386,8 +1393,8 @@ int CSFM::incrementalMCSfM2()
 			//-- Export to disk computed scene (data & visualizable results)
 			std::cout << "...Export SfM_Data to disk." << std::endl;
 			Save(sfmEngine.Get_SfM_Data(),
-				stlplus::create_filespec(sOutputDir, "sfm_data_for_cam_" + to_string(cam), ".bin"),
-				ESfM_Data(ALL));
+				stlplus::create_filespec(sOutputDir, "sfm_data_for_cam_" + to_string(cam), ".json"),
+				ESfM_Data(EXTRINSICS|STRUCTURE));
 
 			Save(sfmEngine.Get_SfM_Data(),
 				stlplus::create_filespec(sOutputDir, "cloud_and_poses_for_cam_" + to_string(cam), ".ply"),
@@ -1402,7 +1409,7 @@ int CSFM::incrementalMCSfM2()
 		//3.Integrate the single sfm_data scene poses and structure into the global sfm_data scene poses
 		for (auto & pose_it : sfmEngine.Get_SfM_Data().GetPoses())
 			sfm_data.poses[pose_it.first] = pose_it.second;
-		std::cout << "After Cam_" << to_string(cam) << " global sfm, poses size:" << sfm_data.poses.size() << std::endl;
+		record_out<< "After Cam_" << to_string(cam) << " incremental_v2 sfm, poses size:" << sfmEngine.Get_SfM_Data().poses.size()<<"/"<<sfm_data.poses.size() << std::endl;
 
 		for (auto & landmark_it : sfmEngine.Get_SfM_Data().GetLandmarks())
 		{
@@ -1410,7 +1417,7 @@ int CSFM::incrementalMCSfM2()
 			Landmark landmark = landmark_it.second;
 			sfm_data.structure[landmark_id] = landmark;
 		}
-		std::cout << "After Cam_" << to_string(cam) << " global sfm, structure size:" << sfm_data.structure.size() << std::endl;
+		record_out << "After Cam_" << to_string(cam) << " incremental_v2 sfm, structure size:" << sfmEngine.Get_SfM_Data().structure.size() << "/"<<sfm_data.structure.size() << std::endl;
 	}
 
 	Save(sfm_data,
@@ -2061,23 +2068,9 @@ int CSFM::groupSfM()
 	//sfm_init_MCImageListing();
 	//computeMCFeatures();
 	//computeMCMatches();
-	//globalMCSfM();
+	globalMCSfM();
 	//incrementalMCSfM2();
 	Evaluate_InitialPoses();
-	PairWiseMatches map_GeometricMatches;
-	if (!Load(map_GeometricMatches, sOutputDir + "/matches.e.bin"))
-	{
-		std::cout << "Cannot load input matches file";
-		return EXIT_FAILURE;
-	}
-	std::cout << "\t GeometricMatches RESULTS LOADED;"
-		<< " #pair: " << map_GeometricMatches.size() << std::endl;
-	//-- export Adjacency matrix
-	std::cout << "\n Export Adjacency Matrix of the pairwise's geometric matches"
-		<< std::endl;
-	PairWiseMatchingToAdjacencyMatrixSVG_MC(sfm_data.views.size(),7,
-		map_GeometricMatches,
-		stlplus::create_filespec(sOutputDir, "GeometricAdjacencyMatrix_MC", "svg"));
 	return EXIT_SUCCESS;
 }
 

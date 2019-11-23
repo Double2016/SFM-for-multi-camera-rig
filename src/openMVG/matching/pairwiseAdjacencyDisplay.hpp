@@ -75,7 +75,7 @@ void PairWiseMatchingToAdjacencyMatrixSVG_MC
 	const std::string & sOutName
 )
 {
-	size_t stationnum = NbImages / NbImages;
+	size_t stationnum = NbImages / NbCameras;
 	if (!map_Matches.empty())
 	{
 		const float scaleFactor = 5.0f;
@@ -113,7 +113,7 @@ void PairWiseMatchingToAdjacencyMatrixSVG_MC
 			svg::svgStyle().stroke("black", 1.0));
 
 		//Separate the different camera
-		for (size_t l = 1; l < NbCameras-1; l++)
+		for (size_t l = 1; l < NbCameras; l++)
 		{
 			//level line
 			svgStream.drawLine(0, (l*stationnum)*scaleFactor, (NbImages)*scaleFactor, (l*stationnum)*scaleFactor,
