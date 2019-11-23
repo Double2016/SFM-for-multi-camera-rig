@@ -1,118 +1,6 @@
 
 #include"fatCSFM.hpp"
 
-
-///开始sfm_init_ImageListing
-/// Check that Kmatrix is a string like "f;0;ppx;0;f;ppy;0;0;1"
-/// With f,ppx,ppy as valid numerical value
-
-double DepthCleaning_Double
-(
-	SfM_Data & sfm_data,
-	const double k_factor
-)
-{
-	using DepthAccumulatorT = std::vector<double>;
-	std::map<IndexT, DepthAccumulatorT > map_depth_accumulator;
-
-	// For each landmark accumulate the camera/point depth info for each view
-	for (const auto & landmark_it : sfm_data.structure)
-	{
-		const Observations & obs = landmark_it.second.obs;
-		for (const auto & obs_it : obs)
-		{
-			const View * view = sfm_data.views.at(obs_it.first).get();
-			if (sfm_data.IsPoseAndIntrinsicDefined(view))
-			{
-				const Pose3 pose = sfm_data.GetPoseOrDie(view);
-				const double depth = Depth(pose.rotation(), pose.translation(), landmark_it.second.X);
-				if (depth > 0)
-				{
-					map_depth_accumulator[view->id_view].push_back(depth);
-				}
-			}
-		}
-	}
-
-	double min_median_value = std::numeric_limits<double>::max();
-	std::map<IndexT, double > map_median_depth;
-	for (const auto & iter : sfm_data.GetViews())
-	{
-		const View * v = iter.second.get();
-		const IndexT view_id = v->id_view;
-		if (map_depth_accumulator.count(view_id) == 0)
-			continue;
-		// Compute median from the depth distribution
-		const auto & acc = map_depth_accumulator.at(view_id);
-		double min, max, mean, median;
-		if (minMaxMeanMedian(acc.begin(), acc.end(), min, max, mean, median))
-		{
-
-			min_median_value = std::min(min_median_value, median);
-			// Compute depth threshold for each view: factor * medianDepth
-			map_median_depth[view_id] = k_factor * median;
-		}
-	}
-	map_depth_accumulator.clear();
-
-	// Delete invalid landmarks
-	size_t cpt = 0;
-	size_t lcpt = 0;
-	for (auto & landmark_it : sfm_data.structure)
-	{
-		Observations obs;
-		for (auto & obs_it : landmark_it.second.obs)
-		{
-			const View * view = sfm_data.views.at(obs_it.first).get();
-			if (sfm_data.IsPoseAndIntrinsicDefined(view))
-			{
-				const Pose3 pose = sfm_data.GetPoseOrDie(view);
-				const double depth = Depth(pose.rotation(), pose.translation(), landmark_it.second.X);
-				if (depth > 0
-					&& map_median_depth.count(view->id_view)
-					&& depth < map_median_depth[view->id_view])
-					obs.insert(obs_it);
-				else
-					++cpt;
-			}
-		}
-		landmark_it.second.obs.swap(obs);
-		if (landmark_it.second.obs.size() == 0)
-		{
-			sfm_data.structure.erase(landmark_it.first);
-			lcpt++;
-		}
-	}
-	std::cout << "#point depth filter: " << cpt << " measurements removed" << std::endl;
-	std::cout << "#point depth filter: " << lcpt << " landmarks removed" << std::endl;
-
-	return min_median_value;
-}
-
-bool checkIntrinsicStringValidity(const std::string & Kmatrix, double & focal, double & ppx, double & ppy)
-{
-	std::vector<std::string> vec_str;
-	stl::split(Kmatrix, ';', vec_str);
-	if (vec_str.size() != 9) {
-		std::cout << "\n Missing ';' character" << std::endl;
-		return false;
-	}
-	// Check that all K matrix value are valid numbers
-	for (size_t i = 0; i < vec_str.size(); ++i) {
-		double readvalue = 0.0;
-		std::stringstream ss;
-		ss.str(vec_str[i]);
-		if (!(ss >> readvalue)) {
-			std::cout << "\n Used an invalid not a number character" << std::endl;
-			return false;
-		}
-		if (i == 0) focal = readvalue;
-		if (i == 2) ppx = readvalue;
-		if (i == 5) ppy = readvalue;
-	}
-	return true;
-}
-
 bool checkGroupIntrinsicStringValidity(const std::string & Kmatrix, std::vector<double> & focal, std::vector<double> & ppx, std::vector<double> & ppy)
 {
 	std::vector<std::string> vec_str;
@@ -137,166 +25,6 @@ bool checkGroupIntrinsicStringValidity(const std::string & Kmatrix, std::vector<
 	return true;
 }
 
-std::pair<bool, Vec3> checkGPS
-(
-	const std::string & filename,
-	const int & GPS_to_XYZ_method = 0
-)
-{
-	std::pair<bool, Vec3> val(false, Vec3::Zero());
-	std::unique_ptr<Exif_IO> exifReader(new Exif_IO_EasyExif);
-	if (exifReader)
-	{
-		// Try to parse EXIF metada & check existence of EXIF data
-		if (exifReader->open(filename) && exifReader->doesHaveExifInfo())
-		{
-			// Check existence of GPS coordinates
-			double latitude, longitude, altitude;
-			if (exifReader->GPSLatitude(&latitude) &&
-				exifReader->GPSLongitude(&longitude) &&
-				exifReader->GPSAltitude(&altitude))
-			{
-				// Add ECEF or UTM XYZ position to the GPS position array
-				val.first = true;
-				switch (GPS_to_XYZ_method)
-				{
-				case 1:
-					val.second = lla_to_utm(latitude, longitude, altitude);
-					break;
-				case 0:
-				default:
-					val.second = lla_to_ecef(latitude, longitude, altitude);
-					break;
-				}
-			}
-		}
-	}
-	return val;
-}
-
-//巩雪萍 2019 / 5 / 26 16:45 : 42
-std::pair<bool, openMVG::Vec3> checkXYZfromcsv(const std::string & sImFilenamePart, const std::string & imagename)
-{
-	//std::cerr << "sGPSfile = " << sImageFilenameGPS << " " << "imagename=" << imagename << std::endl;
-	std::pair<bool, Vec3> val(false, Vec3::Zero());
-	ifstream inf;
-	inf.open(sImFilenamePart.c_str());
-	string lineStr;
-	char buf[1024];
-	inf.getline(buf, 1024);
-	string  Photoname;
-	double X, Y, Z;
-	vector<vector<string>> strArray;
-	while (std::getline(inf, lineStr))
-	{
-		stringstream ss(lineStr);//来自sstream
-		string str;
-		vector<string> lineArray;
-		//按照逗号分隔
-		while (getline(ss, str, ','))
-			lineArray.push_back(str);
-		Photoname = lineArray[0] + ".jpg";
-		X = atof(lineArray[1].c_str());
-		Y = atof(lineArray[2].c_str());
-		Z = atof(lineArray[3].c_str());
-		//std::cout << Photoname << " " << imagename << std::endl;
-		if (imagename.compare(Photoname) == 0)
-		{
-			std::cerr << "开始读取 gps文件   " << Photoname << std::endl;
-			val.first = true;
-			val.second = { X,Y,Z };
-			break;
-		}
-	}
-
-	inf.close();
-	return val;
-}
-
-bool checkPosefromPSfile(const std::string & sImageFilenamePose, const std::string & imagename, openMVG::geometry::Pose3 &pose)
-{
-	FILE* fp = fopen(sImageFilenamePose.c_str(), "r");
-	if (!fp)
-	{ 
-		std::cout << "ERROR!!!!" << std::endl;
-		return false; 
-	}
-	char ch[1262], Photoname[1262];
-	double X, Y, Z, Omega, Phi, Kappa, r11, r12, r13, r21, r22, r23, r31, r32, r33;
-	fscanf(fp, "%s %s %s\n",
-		ch, ch, ch);
-
-	fscanf(fp, "%s %s %s %s\n",
-		ch, ch, ch, ch);
-	std::cout << "Finding......" << std::endl;
-	while (!feof(fp))
-	{
-		fscanf(fp, "%s %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf \n",
-			Photoname, &X, &Y, &Z, &Omega, &Phi, &Kappa, &r11, &r12, &r13, &r21, &r22, &r23, &r31, &r32, &r33);
-		
-		//因为PS的旋转矩阵和Smart3D（OpenMVG）定义不一样
-		r21 *= -1; r22 *= -1; r23 *= -1; r31 *= -1; r32 *= -1; r33 *= -1;
-		Vec3 cen = Vec3(X, Y, Z);
-		Mat3 rot;
-		rot << r11, r12, r13, r21, r22, r23, r31, r32, r33;
-		
-		if (imagename.compare(Photoname) == 0)
-		{
-			//std::cout << imagename <<",";
-			pose= openMVG::geometry::Pose3(rot,cen);
-			std::cout << Photoname<< ":" << cen[0] << " " << cen[1] << " " << cen[2] << endl;
-			return true;
-		}
-	}
-	fclose(fp);
-	return false;
-}
-
-bool LoadPosefromPSfile(const std::string & sImageFilenamePose, std::map<std::string,openMVG::geometry::Pose3> &PS_poses)
-{
-	FILE* fp = fopen(sImageFilenamePose.c_str(), "r");
-	if (!fp)
-	{
-		std::cout << "ERROR!!!!" << std::endl;
-		return false;
-	}
-	char ch[1262], Photoname[1262];
-	double X, Y, Z, Omega, Phi, Kappa, r11, r12, r13, r21, r22, r23, r31, r32, r33;
-	fscanf(fp, "%s %s %s\n",
-		ch, ch, ch);
-
-	fscanf(fp, "%s %s %s %s\n",
-		ch, ch, ch, ch);
-	std::cout << "Finding......" << std::endl;
-	while (!feof(fp))
-	{
-		fscanf(fp, "%s %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf \n",
-			Photoname, &X, &Y, &Z, &Omega, &Phi, &Kappa, &r11, &r12, &r13, &r21, &r22, &r23, &r31, &r32, &r33);
-
-		//因为PS的旋转矩阵和Smart3D（OpenMVG）定义不一样
-		r21 *= -1; r22 *= -1; r23 *= -1; r31 *= -1; r32 *= -1; r33 *= -1;
-		Vec3 cen = Vec3(X, Y, Z);
-		Mat3 rot;
-		rot << r11, r12, r13, r21, r22, r23, r31, r32, r33;
-		openMVG::geometry::Pose3 pose = openMVG::geometry::Pose3(rot, cen);
-		PS_poses[Photoname] = pose;
-	}
-	fclose(fp);
-	if(PS_poses.empty())
-		return false;
-	return true;
-}
-
-// Naive function for finding the biggest common root dir from two paths
-std::string FindCommonRootDir(const std::string & dir1, const std::string & dir2)
-{
-	int i = 0;
-	for (; i != std::min(dir1.size(), dir2.size()); i++)
-	{
-		if (dir1[i] != dir2[i]) break;
-	}
-	return dir1.substr(0, i);
-}
 
 //int CompareCoords_2sfm_data()
 //{
@@ -449,35 +177,6 @@ std::string FindCommonRootDir(const std::string & dir1, const std::string & dir2
 //	return getchar();
 //}
 
-/// Check string of prior weights
-std::pair<bool, Vec3> checkPriorWeightsString
-(
-	const std::string &sWeights
-)
-{
-	std::pair<bool, Vec3> val(true, Vec3::Zero());
-	std::vector<std::string> vec_str;
-	stl::split(sWeights, ';', vec_str);
-	if (vec_str.size() != 3)
-	{
-		std::cout << "\n Missing ';' character in prior weights" << std::endl;
-		val.first = false;
-	}
-	// Check that all weight values are valid numbers
-	for (size_t i = 0; i < vec_str.size(); ++i)
-	{
-		double readvalue = 0.0;
-		std::stringstream ss;
-		ss.str(vec_str[i]);
-		if (!(ss >> readvalue)) {
-			std::cout << "\n Used an invalid not a number character in local frame origin" << std::endl;
-			val.first = false;
-		}
-		val.second[i] = readvalue;
-	}
-	return val;
-}
-
 features::EDESCRIBER_PRESET stringToEnum(const std::string & sPreset)
 {
 	features::EDESCRIBER_PRESET preset;
@@ -503,26 +202,7 @@ enum EGeometricModel
 	ESSENTIAL_MATRIX_ORTHO = 4
 };
 
-//Pair_Set BuildPairsFromFrustumsIntersections(
-//	const SfM_Data & sfm_data,
-//	const double z_near = -1., // default near plane
-//	const double z_far = -1.)  // default far plane
-//{
-//	const Frustufm_Filter frustum_filter(sfm_data, z_near, z_far);
-//	return frustum_filter.getFrustumIntersectionPairs();
-//}
-
-//
-CSFM::CSFM()
-{
-	//std::ofstream out(recordfile);
-}
-
-CSFM::~CSFM()
-{
-}
-
-/// From 2 given image file-names, find the two corresponding index in the View list
+// From 2 given image file-names, find the two corresponding index in the View list
 bool computeIndexFromImageNames(
 	const SfM_Data & sfm_data,
 	const std::pair<std::string, std::string>& initialPairName,
@@ -557,6 +237,15 @@ bool computeIndexFromImageNames(
 		initialPairIndex.second != UndefinedIndexT);
 }
 
+CSFM::CSFM()
+{
+	//std::ofstream out(recordfile);
+}
+
+CSFM::~CSFM()
+{
+}
+
 enum class ESfMSceneInitializer
 {
 	INITIALIZE_EXISTING_POSES,
@@ -585,319 +274,20 @@ bool StringToEnum_ESfMSceneInitializer
 	return true;
 }
 
-//功能模块
-int CSFM::sfm_init_ImageListing()
+int CSFM::sfm_init_MCImageListing()
 {
-	std::cout << " You called : " << std::endl
-		<< "sfm_init_ImageListing " << std::endl
-		<< "--imageDirectory " << sImageDir << std::endl
-		<< "--sensorWidthDatabase " << sfileDatabase << std::endl
-		<< "--outputDirectory " << sOutputDir << std::endl
-		<< "--focal " << focal_pixels << std::endl
-		<< "--intrinsics " << sKmatrix << std::endl
-		<< "--camera_model " << i_User_camera_model << std::endl
-		<< "--group_camera_model " << b_Group_camera_model << std::endl;
-
-	std::pair<bool, Vec3> prior_w_info(false, Vec3(1000000.0, 1000000.0, 1000000.0));
-	double width = -1, height = -1, focal = -1, ppx = -1, ppy = -1;
-	const EINTRINSIC e_User_camera_model = EINTRINSIC(i_User_camera_model);
-
-	if (!stlplus::folder_exists(sImageDir))
-	{
-		std::cout << "\nThe input directory doesn't exist" << std::endl;
-		return EXIT_FAILURE;
-	}
-
-	if (sOutputDir.empty())
-	{
-		std::cout << "\nInvalid output directory" << std::endl;
-		return EXIT_FAILURE;
-	}
-
-	if (!stlplus::folder_exists(sOutputDir))
-	{
-		if (!stlplus::folder_create(sOutputDir))
-		{
-			std::cout << "\nCannot create output directory" << std::endl;
-			return EXIT_FAILURE;
-		}
-	}
-
-	if (sKmatrix.size() > 0 &&
-		!checkIntrinsicStringValidity(sKmatrix, focal, ppx, ppy))
-	{
-		std::cout << "\nInvalid K matrix input" << std::endl;
-		return EXIT_FAILURE;
-	}
-
-	if (sKmatrix.size() > 0 && focal_pixels != -1.0)
-	{
-		std::cout << "\nCannot combine -f and -k options" << std::endl;
-		return EXIT_FAILURE;
-	}
-
-	std::vector<Datasheet> vec_database;
-	if (!sfileDatabase.empty())
-	{
-		if (!parseDatabase(sfileDatabase, vec_database))
-		{
-			std::cout
-				<< "\nInvalid input database: " << sfileDatabase
-				<< ", please specify a valid file." << std::endl;
-			return EXIT_FAILURE;
-		}
-	}
-
-	// Check if prior weights are given
-	if (b_use_motion_priors && !sPriorWeights.empty())
-		prior_w_info = checkPriorWeightsString(sPriorWeights);
-	else if (b_use_motion_priors|b_use_pose_priors)
-		prior_w_info.first = true;
-
-	std::vector<std::string> vec_image = stlplus::folder_files(sImageDir);
-	std::sort(vec_image.begin(), vec_image.end());
-	// Configure an empty scene with Views and their corresponding cameras
-	
-	sfm_data.s_root_path = sImageDir; // Setup main image root_path
-	Views & views = sfm_data.views;
-	Intrinsics & intrinsics = sfm_data.intrinsics;
-
-	C_Progress_display my_progress_bar(vec_image.size(),
-		std::cout, "\n- Image listing -\n");
-	std::ostringstream error_report_stream;
-	for (std::vector<std::string>::const_iterator iter_image = vec_image.begin();
-		iter_image != vec_image.end();
-		++iter_image, ++my_progress_bar)
-	{
-		// Read meta data to fill camera parameter (w,h,focal,ppx,ppy) fields.
-		width = height = ppx = ppy = focal = -1.0;
-
-		const std::string sImageFilename = stlplus::create_filespec(sImageDir, *iter_image);
-		const std::string sImFilenamePart = stlplus::filename_part(sImageFilename);
-
-		// Test if the image format is supported:
-		if (openMVG::image::GetFormat(sImageFilename.c_str()) == openMVG::image::Unknown)
-		{
-			error_report_stream
-				<< sImFilenamePart << ": Unkown image file format." << "\n";
-			continue; // image cannot be opened
-		}
-
-		if (sImFilenamePart.find("mask.png") != std::string::npos
-			|| sImFilenamePart.find("_mask.png") != std::string::npos)
-		{
-			error_report_stream
-				<< sImFilenamePart << " is a mask image" << "\n";
-			continue;
-		}
-
-		ImageHeader imgHeader;
-		if (!openMVG::image::ReadImageHeader(sImageFilename.c_str(), &imgHeader))
-			continue; // image cannot be read
-
-		width = imgHeader.width;
-		height = imgHeader.height;
-		ppx = width / 2.0;
-		ppy = height / 2.0;
-
-
-		// Consider the case where the focal is provided manually
-		if (sKmatrix.size() > 0) // Known user calibration K matrix
-		{
-			if (!checkIntrinsicStringValidity(sKmatrix, focal, ppx, ppy))
-				focal = -1.0;
-		}
-		else // User provided focal length value
-			if (focal_pixels != -1)
-				focal = focal_pixels;
-
-		// If not manually provided or wrongly provided
-		if (focal == -1)
-		{
-			std::unique_ptr<Exif_IO> exifReader(new Exif_IO_EasyExif);
-			exifReader->open(sImageFilename);
-
-			const bool bHaveValidExifMetadata =
-				exifReader->doesHaveExifInfo()
-				&& !exifReader->getModel().empty();
-
-			if (bHaveValidExifMetadata) // If image contains meta data
-			{
-				const std::string sCamModel = exifReader->getModel();
-
-				// Handle case where focal length is equal to 0
-				if (exifReader->getFocal() == 0.0f)
-				{
-					error_report_stream
-						<< stlplus::basename_part(sImageFilename) << ": Focal length is missing." << "\n";
-					focal = -1.0;
-				}
-				else
-					// Create the image entry in the list file
-				{
-					Datasheet datasheet;
-					if (getInfo(sCamModel, vec_database, datasheet))
-					{
-						// The camera model was found in the database so we can compute it's approximated focal length
-						const double ccdw = datasheet.sensorSize_;
-						focal = std::max(width, height) * exifReader->getFocal() / ccdw;
-					}
-					else
-					{						
-						focal = (std::max)(width, height)*1.2;
-					}
-				}
-			}
-			else
-			{
-				focal = (std::max)(width, height)*1.2;
-			}
-		}
-		// Build intrinsic parameter related to the view
-		std::shared_ptr<IntrinsicBase> intrinsic;
-
-		if (focal > 0 && ppx > 0 && ppy > 0 && width > 0 && height > 0)
-		{
-			// Create the desired camera type
-			switch (e_User_camera_model)
-			{
-			case PINHOLE_CAMERA:
-				intrinsic = std::make_shared<Pinhole_Intrinsic>
-					(width, height, focal, ppx, ppy);
-				break;
-			case PINHOLE_CAMERA_RADIAL1:
-				intrinsic = std::make_shared<Pinhole_Intrinsic_Radial_K1>
-					(width, height, focal, ppx, ppy, 0.0); // setup no distortion as initial guess
-				break;
-			case PINHOLE_CAMERA_RADIAL3:
-				intrinsic = std::make_shared<Pinhole_Intrinsic_Radial_K3>
-					(width, height, focal, ppx, ppy, 0.0, 0.0, 0.0);  // setup no distortion as initial guess
-				break;
-			case PINHOLE_CAMERA_BROWN:
-				intrinsic = std::make_shared<Pinhole_Intrinsic_Brown_T2>
-					(width, height, focal, ppx, ppy, 0.0, 0.0, 0.0, 0.0, 0.0); // setup no distortion as initial guess
-				break;
-			case PINHOLE_CAMERA_FISHEYE:
-				intrinsic = std::make_shared<Pinhole_Intrinsic_Fisheye>
-					(width, height, focal, ppx, ppy, 0.0, 0.0, 0.0, 0.0); // setup no distortion as initial guess
-				break;
-			case CAMERA_SPHERICAL:
-				intrinsic = std::make_shared<Intrinsic_Spherical>
-					(width, height);
-				break;
-			default:
-				std::cout << "Error: unknown camera model: " << (int)e_User_camera_model << std::endl;
-				return EXIT_FAILURE;
-			}
-		}
-
-		// Build the view corresponding to the image
-		
-		if (!sGPSfile.empty()&& b_use_motion_priors)
-		{
-		    gps_info = checkXYZfromcsv(sGPSfile, sImFilenamePart);
-		}
-		
-		if (gps_info.first && b_use_motion_priors)
-		{
-			ViewPriors v(*iter_image, views.size(), views.size(), views.size(), width, height);
-
-			// Add intrinsic related to the image (if any)
-			if (intrinsic == nullptr)
-			{
-				//Since the view have invalid intrinsic data
-				// (export the view, with an invalid intrinsic field value)
-				v.id_intrinsic = UndefinedIndexT;
-			}
-			else
-			{
-				// Add the defined intrinsic to the sfm_container
-				intrinsics[v.id_intrinsic] = intrinsic;
-			}
-
-			v.b_use_pose_center_ = true;
-			v.pose_center_ = gps_info.second;
-			// prior weights
-			if (prior_w_info.first == true)
-			{
-				v.center_weight_ = prior_w_info.second;
-			}
-
-			// Add the view to the sfm_container
-			views[v.id_view] = std::make_shared<ViewPriors>(v);
-		}
-		else
-		{
-			View v(*iter_image, views.size(), views.size(), views.size(), width, height);
-
-			// Add intrinsic related to the image (if any)
-			if (intrinsic == nullptr)
-			{
-				//Since the view have invalid intrinsic data
-				// (export the view, with an invalid intrinsic field value)
-				v.id_intrinsic = UndefinedIndexT;
-			}
-			else
-			{
-				// Add the defined intrinsic to the sfm_container
-				intrinsics[v.id_intrinsic] = intrinsic;
-			}
-
-			// Add the view to the sfm_container
-			views[v.id_view] = std::make_shared<View>(v);
-		}
-	}
-
-	// Display saved warning & error messages if any.
-	if (!error_report_stream.str().empty())
-	{
-		std::cout
-			<< "\nWarning & Error messages:" << std::endl
-			<< error_report_stream.str() << std::endl;
-	}
-
-	// Group camera that share common properties if desired (leads to more faster & stable BA).
-	if (b_Group_camera_model)
-	{
-		GroupSharedIntrinsics(sfm_data);
-	}
-
-	// Store SfM_Data views & intrinsic data
-	if (!Save(
-		sfm_data,
-		stlplus::create_filespec(sOutputDir, "sfm_data.json").c_str(),
-		ESfM_Data(VIEWS | INTRINSICS)))
-	{
-		return EXIT_FAILURE;
-	}
-
-	std::cout << std::endl
-		<< "SfMInit_ImageListing report:\n"
-		<< "listed #File(s): " << vec_image.size() << "\n"
-		<< "usable #File(s) listed in sfm_data: " << sfm_data.GetViews().size() << "\n"
-		<< "usable #Intrinsic(s) listed in sfm_data: " << sfm_data.GetIntrinsics().size() << std::endl;
-
-	return EXIT_SUCCESS;
-}
-
-int CSFM::sfm_init_GroupImageListing()
-{
-	std::ofstream out(recordfile);
 	std::cout << " You called : " << std::endl
 		<< "sfm_init_GroupImageListing " << std::endl
 		<< "--imageDirectory " << sImageDir << std::endl
-		<< "--sensorWidthDatabase " << sfileDatabase << std::endl
 		<< "--outputDirectory " << sOutputDir << std::endl
 		<< "--focal " << focal_pixels << std::endl
 		<< "--intrinsics " << sKmatrix << std::endl
 		<< "--camera_model " << i_User_camera_model << std::endl
-		<< "--group_camera" << b_Group_camera_model << std::endl
-		<< "--group_camera_num" << Group_camera_num << std::endl
-		<< "--b_views_grouped" << b_views_grouped << std::endl;
+		<< "--group_camera_num" << Group_camera_num << std::endl;
 
-	std::pair<bool, Vec3> prior_w_info(false, Vec3(1000000.0, 1000000.0, 1000000.0));
-	double width=-1, height=-1;
-	std::vector<double> focal(Group_camera_num, -1),ppx(Group_camera_num, -1), ppy(Group_camera_num, -1);
+	std::pair<bool, Vec3> prior_w_info(false, Vec3(1.0, 1.0, 1.0));
+	double width = -1, height = -1;
+	std::vector<double> focal(Group_camera_num, -1), ppx(Group_camera_num, -1), ppy(Group_camera_num, -1);
 	const EINTRINSIC e_User_camera_model = EINTRINSIC(i_User_camera_model);
 
 	if (!stlplus::folder_exists(sImageDir))
@@ -929,27 +319,21 @@ int CSFM::sfm_init_GroupImageListing()
 	else
 		std::cout << "Kmatrix size:" << focal.size() << std::endl;
 
-	// Check if prior weights are given
-	if (b_use_motion_priors && !sPriorWeights.empty())
-	{
-		prior_w_info = checkPriorWeightsString(sPriorWeights);
-	}
-	else if (b_use_motion_priors)
-	{
-		prior_w_info.first = true;
-	}
-
-	std::vector<string> subdirectories = stlplus::folder_subdirectories(sImageDir);
-	std::cout << "Total groups num:"<< subdirectories.size() << std::endl;
-
+	//存储影像根目录
+	sfm_data.s_root_path = sImageDir; // Setup main image root_path
+	image_root_dirs = stlplus::folder_subdirectories(sImageDir);
 	int i_key = 0;
-	for (int subdir = 0; subdir < subdirectories.size(); subdir++)
+	std::cout << "Total sub_directories num of sImageDir:" << image_root_dirs.size() << std::endl;
+	if (image_root_dirs.size() < 1)
+		return EXIT_FAILURE;
+
+	//影像按镜头分组
+	for (int subdir = 0; subdir < image_root_dirs.size(); subdir++, i_key++)
 	{
-		std::vector<std::string> vec_image = stlplus::folder_files(sImageDir+"/"+ subdirectories[subdir]);
+		std::vector<std::string> vec_image = stlplus::folder_files(sfm_data.s_root_path + "/" + image_root_dirs[subdir]);
 		std::sort(vec_image.begin(), vec_image.end());
 		// Configure an empty scene with Views and their corresponding cameras
 
-		sfm_data.s_root_path = sImageDir; // Setup main image root_path
 		Views & views = sfm_data.views;
 		Intrinsics & intrinsics = sfm_data.intrinsics;
 
@@ -958,7 +342,7 @@ int CSFM::sfm_init_GroupImageListing()
 			iter_image != vec_image.end();
 			++iter_image)
 		{
-			const std::string sImageFilename = stlplus::create_filespec(sImageDir + "/" + subdirectories[subdir], *iter_image);
+			const std::string sImageFilename = stlplus::create_filespec(sImageDir + "/" + image_root_dirs[subdir], *iter_image);
 			const std::string sImFilenamePart = stlplus::filename_part(sImageFilename);
 
 			// Test if the image format is supported:
@@ -1016,67 +400,25 @@ int CSFM::sfm_init_GroupImageListing()
 					return EXIT_FAILURE;
 				}
 			}
-			// Build the view corresponding to the image
 
-			if (!sGPSfile.empty())
+			View v(*iter_image, views.size(), views.size(), views.size(), width, height);
+
+			// Add intrinsic related to the image (if any)
+			if (intrinsic == nullptr)
 			{
-				if (b_use_motion_priors)
-					gps_info = checkXYZfromcsv(sGPSfile, sImFilenamePart);
-			}
-			else 
-			{
-				gps_info = checkGPS(sImageFilename, i_GPS_XYZ_method);
-			}
-			if (gps_info.first && b_use_motion_priors)
-			{
-				ViewPriors v(*iter_image, views.size(), views.size(), views.size(), width, height);
-
-				// Add intrinsic related to the image (if any)
-				if (intrinsic == nullptr)
-				{
-					//Since the view have invalid intrinsic data
-					// (export the view, with an invalid intrinsic field value)
-					v.id_intrinsic = UndefinedIndexT;
-				}
-				else
-				{
-					// Add the defined intrinsic to the sfm_container
-					intrinsics[v.id_intrinsic] = intrinsic;
-				}
-
-				v.b_use_pose_center_ = true;
-				v.pose_center_ = gps_info.second;
-				// prior weights
-				if (prior_w_info.first == true)
-				{
-					v.center_weight_ = prior_w_info.second;
-				}
-
-				// Add the view to the sfm_container
-				views[v.id_view] = std::make_shared<ViewPriors>(v);
+				//Since the view have invalid intrinsic data
+				// (export the view, with an invalid intrinsic field value)
+				v.id_intrinsic = UndefinedIndexT;
 			}
 			else
 			{
-				View v(*iter_image, views.size(), views.size(), views.size(), width, height);
-
-				// Add intrinsic related to the image (if any)
-				if (intrinsic == nullptr)
-				{
-					//Since the view have invalid intrinsic data
-					// (export the view, with an invalid intrinsic field value)
-					v.id_intrinsic = UndefinedIndexT;
-				}
-				else
-				{
-					// Add the defined intrinsic to the sfm_container
-					intrinsics[v.id_intrinsic] = intrinsic;
-				}
-
-				// Add the view to the sfm_container
-				views[v.id_view] = std::make_shared<View>(v);
+				// Add the defined intrinsic to the sfm_container
+				intrinsics[v.id_intrinsic] = intrinsic;
 			}
+
+			// Add the view to the sfm_container
+			views[v.id_view] = std::make_shared<View>(v);
 		}
-		i_key++;
 		// Display saved warning & error messages if any.
 		if (!error_report_stream.str().empty())
 		{
@@ -1085,12 +427,12 @@ int CSFM::sfm_init_GroupImageListing()
 				<< error_report_stream.str() << std::endl;
 		}
 	}
+
 	if (i_key != Group_camera_num)
 	{
-		std::cout << "Error: num of cameras in group:" << i_key << " is not equal to Group_camera_num: " << Group_camera_num << std::endl;
+		std::cout << "Error: num of cameras in group:" << i_key << " is not equal to Group_camera_num : " << Group_camera_num << std::endl;
 		return EXIT_FAILURE;
 	}
-	
 	// Group camera that share common properties if desired (leads to more faster & stable BA).
 	if (b_Group_camera_model)
 	{
@@ -1098,14 +440,15 @@ int CSFM::sfm_init_GroupImageListing()
 	}
 
 	// Store SfM_Data views & intrinsic data
+	sSfM_Data_Filename = sOutputDir + "/sfm_data.json";
 	if (!Save(
 		sfm_data,
-		stlplus::create_filespec(sOutputDir, "sfm_data.json").c_str(),
+		sSfM_Data_Filename,
 		ESfM_Data(VIEWS | INTRINSICS)))
 	{
 		return EXIT_FAILURE;
 	}
-
+	station_num = sfm_data.GetViews().size() / Group_camera_num;
 	std::cout << std::endl
 		<< "SfMInit_ImageListing report:\n"
 		<< "usable #File(s) listed in sfm_data: " << sfm_data.GetViews().size() << "\n"
@@ -1113,7 +456,7 @@ int CSFM::sfm_init_GroupImageListing()
 	return EXIT_SUCCESS;
 }
 
-int CSFM::computeFeatures()
+int CSFM::computeMCFeatures()
 {
 	std::ofstream out(recordfile,ios::app);
 	
@@ -1139,11 +482,6 @@ int CSFM::computeFeatures()
 			<< "The input file \"" << sSfM_Data_Filename << "\" cannot be read" << std::endl;
 		return EXIT_FAILURE;
 	}
-
-	std::vector<string> groups= stlplus::folder_subdirectories(sfm_data.s_root_path);
-	int station_num = sfm_data.views.size();
-	if (Group_camera_num > 1)
-		station_num /= Group_camera_num;
 
 	// b. Init the image_describer
 	// - retrieve the used one in case of pre-computed features
@@ -1265,15 +603,9 @@ int CSFM::computeFeatures()
 			std::advance(iterViews, i);
 			const View * view = iterViews->second.get();
 			std::string sView_filename ;
-			if (groups.size() > 1)
-			{
-				if (b_views_grouped)
-					sView_filename = stlplus::create_filespec(sfm_data.s_root_path + "/" + groups[i / 7], view->s_Img_path);
-				else
-					sView_filename = stlplus::create_filespec(sfm_data.s_root_path + "/" + groups[i / station_num], view->s_Img_path);
-			}
-			else
-				sView_filename = stlplus::create_filespec(sfm_data.s_root_path, view->s_Img_path);
+			if (image_root_dirs.size() > 1)
+				sView_filename = stlplus::create_filespec(sfm_data.s_root_path + "/" + image_root_dirs[i / station_num], view->s_Img_path);
+			
 			const std::string
 				sFeat = stlplus::create_filespec(sOutputDir, stlplus::basename_part(sView_filename), "feat"),
 				sDesc = stlplus::create_filespec(sOutputDir, stlplus::basename_part(sView_filename), "desc");
@@ -1343,29 +675,9 @@ int CSFM::computeFeatures()
 		}
 		std::cout << "Task done in (s): " << timer.elapsed() << std::endl;
 	}
-
 	return EXIT_SUCCESS;
 }
 
-//针对Smart3D导出的OPK计算旋转矩阵R
-void EulerAngleOPK2Matrix(Mat3 &R, double omega, double phi, double kappa)
-{
-	omega = D2R(omega);
-	phi = D2R(phi);
-	kappa = D2R(kappa);
-	R(0, 0) = cos(phi)*cos(kappa);
-	R(0, 1) = -cos(phi)*sin(kappa);
-	R(0, 2) = sin(phi);
-
-	R(1, 0) = cos(omega)*sin(kappa) + sin(omega)*sin(phi)*cos(kappa);
-	R(1, 1) = cos(omega)*cos(kappa) - sin(omega)*sin(phi)*sin(kappa);
-	R(1, 2) = -sin(omega)*cos(phi);
-
-	R(2, 0) = sin(omega)*sin(kappa) - cos(omega)*sin(phi)*cos(kappa);
-	R(2, 1) = sin(omega)*cos(kappa) + cos(omega)*sin(phi)*sin(kappa);
-	R(2, 2) = cos(omega)*cos(phi);
-	R.transposeInPlace();
-}
 void AdjacencyMatrixToSVG
 (
 	const size_t NbImages,
@@ -1415,7 +727,7 @@ void AdjacencyMatrixToSVG
 }
 
 
-int CSFM::computeMatches()
+int CSFM::computeMCMatches()
 {
 	std::ofstream out(recordfile, ios::app);
 	std::cout << " You called : " << "\n"
@@ -1427,20 +739,11 @@ int CSFM::computeMatches()
 		<< "--ratio " << fDistRatio << "\n"
 		<< "--geometric_model " << sGeometricModel << "\n"
 		<< "--video_mode_matching " << iMatchingVideoMode << "\n"
-		<< "--pair_list " << sPredefinedPairList << "\n"
 		<< "--nearest_matching_method " << sNearestMatchingMethod << "\n"
 		<< "--guided_matching " << bGuided_matching << "\n"
 		<< "--cache_size " << ((ui_max_cache_size == 0) ? "unlimited" : std::to_string(ui_max_cache_size)) << std::endl;
-	if (ePairmode!=PAIR_FOR_GROUPCAMERAS)
+	if (ePairmode!=PAIR_FOR_MULTICAMERAS)
 		ePairmode = (iMatchingVideoMode == -1) ? PAIR_EXHAUSTIVE : PAIR_CONTIGUOUS;
-
-	if (sPredefinedPairList.length()) {
-		ePairmode = PAIR_FROM_FILE;
-		if (iMatchingVideoMode > 0) {
-			std::cout << "\nIncompatible options: --videoModeMatching and --pairList" << std::endl;
-			return EXIT_FAILURE;
-		}
-	}
 
 	EGeometricModel eGeometricModelToCompute = FUNDAMENTAL_MATRIX;
 	std::string sGeometricMatchesFilename = "";
@@ -1543,7 +846,7 @@ int CSFM::computeMatches()
 			++iter)
 		{
 			const View * v = iter->second.get();
-			vec_fileNames.push_back(stlplus::create_filespec(sfm_data.s_root_path,
+			vec_fileNames.push_back(stlplus::create_filespec(sfm_data.s_root_path + "/" + image_root_dirs[v->id_view/ station_num],
 				v->s_Img_path));
 			vec_imagesSize.push_back(std::make_pair(v->ui_width, v->ui_height));
 		}
@@ -1573,8 +876,7 @@ int CSFM::computeMatches()
 		{
 		case PAIR_EXHAUSTIVE: std::cout << "exhaustive pairwise matching" << std::endl; break;
 		case PAIR_CONTIGUOUS: std::cout << "sequence pairwise matching" << std::endl; break;
-		case PAIR_FROM_FILE:  std::cout << "user defined pairwise matching" << std::endl; break;
-		case PAIR_FOR_GROUPCAMERAS: std::cout << "pairwise matching for group cameras" << std::endl; break;
+		case PAIR_FOR_MULTICAMERAS: std::cout << "pairwise matching for multi-cameras" << std::endl; break;
 		}
 
 		// Allocate the right Matcher according the Matching requested method
@@ -1637,14 +939,7 @@ int CSFM::computeMatches()
 			{
 			case PAIR_EXHAUSTIVE: pairs = exhaustivePairs(sfm_data.GetViews().size()); break;
 			case PAIR_CONTIGUOUS: pairs = contiguousWithOverlap(sfm_data.GetViews().size(), iMatchingVideoMode); break;
-			case PAIR_FROM_FILE:
-				if (!loadPairs(sfm_data.GetViews().size(), sPredefinedPairList, pairs))
-				{
-					return EXIT_FAILURE;
-				}
-				break;
-			case PAIR_FOR_GROUPCAMERAS:
-				pairs = groupCamerasPairs(sfm_data.GetViews().size(), Group_camera_num,b_views_grouped); break;
+			case PAIR_FOR_MULTICAMERAS:pairs = MultiCamerasPairs(sfm_data.GetViews().size(), Group_camera_num); break;
 			}
 			// Photometric matching of putative pairs
 			collectionMatcher->Match(regions_provider, pairs, map_PutativesMatches, &progress);
@@ -1788,12 +1083,6 @@ int CSFM::computeMatches()
 			std::cout << "Task done in (s): " << timer.elapsed() << std::endl;
 			
 	    }
-		//-- export Adjacency matrix
-		std::cout << "\n Export Adjacency Matrix of the pairwise's geometric matches"
-			<< std::endl;
-		PairWiseMatchingToAdjacencyMatrixSVG(vec_fileNames.size(),
-			map_GeometricMatches,
-			stlplus::create_filespec(sOutputDir, "GeometricAdjacencyMatrix", "svg"));
 		//-- export view pair graph once geometric filter have been done
 		{
 			std::set<IndexT> set_ViewIds;
@@ -1809,7 +1098,7 @@ int CSFM::computeMatches()
 	return EXIT_SUCCESS;
 }
 
-int CSFM::globalSfM()
+int CSFM::globalMCSfM()
 {
 	std::ofstream out(recordfile, ios::app);
 	if (iRotationAveragingMethod < ROTATION_AVERAGING_L1 ||
@@ -1850,179 +1139,118 @@ int CSFM::globalSfM()
 		return EXIT_FAILURE;
 	}
 
-	// Features reading
-	std::shared_ptr<Features_Provider> feats_provider = std::make_shared<Features_Provider>();
-	if (!feats_provider->load(sfm_data, sOutputDir, regions_type)) {
-		std::cout << std::endl
-			<< "Invalid features." << std::endl;
-		return EXIT_FAILURE;
-	}
-	// Matches reading
-	std::shared_ptr<Matches_Provider> matches_provider = std::make_shared<Matches_Provider>();
-	if // Try to read the provided match filename or the default one (matches.e.txt/bin)
-		(
-			!(matches_provider->load(sfm_data, sMatchFilename) ||
-				matches_provider->load(sfm_data, stlplus::create_filespec(sOutputDir, "matches.e.bin")) ||
-				matches_provider->load(sfm_data, stlplus::create_filespec(sOutputDir, "matches.f.bin")))
-			)
-	{
-		std::cout << std::endl
-			<< "Invalid matches file." << std::endl;
-		return EXIT_FAILURE;
-	}
 	//---------------------------------------
-  // Global SfM reconstruction process
+  // Global SfM reconstruction process for each camera
   //---------------------------------------
-
-	openMVG::system::Timer timer;
-	GlobalSfMReconstructionEngine_RelativeMotions sfmEngine(
-		sfm_data,
-		sOutputDir,
-		stlplus::create_filespec(sOutputDir, "Reconstruction_Report.html"));
-
-	// Configure the features_provider & the matches_provider
-	sfmEngine.SetFeaturesProvider(feats_provider.get());
-	sfmEngine.SetMatchesProvider(matches_provider.get());
-
-	// Configure reconstruction parameters
-	sfmEngine.Set_Intrinsics_Refinement_Type(intrinsic_refinement_options);
-	
-	sfmEngine.Set_Use_Motion_Prior(b_use_motion_priors);
-
-	// Configure motion averaging method
-	sfmEngine.SetRotationAveragingMethod(
-		ERotationAveragingMethod(iRotationAveragingMethod));
-	sfmEngine.SetTranslationAveragingMethod(
-		ETranslationAveragingMethod(iTranslationAveragingMethod));
-
-	if (sfmEngine.Process())
+	station_num = sfm_data.views.size() / Group_camera_num;
+	for (int cam = 0; cam < Group_camera_num; cam++)
 	{
-		std::cout << std::endl << " Total Ac-Global-Sfm took (s): " << timer.elapsed() << std::endl;
-
-		std::cout << "...Generating SfM_Report.html" << std::endl;
-		Generate_SfM_Report(sfmEngine.Get_SfM_Data(),
-			stlplus::create_filespec(sOutputDir, "SfMReconstruction_Report.html"));
-
-		//-- Export to disk computed scene (data & visualizable results)
-		std::cout << "...Export SfM_Data to disk." << std::endl;
-		Save(sfmEngine.Get_SfM_Data(),
-			stlplus::create_filespec(sOutputDir, "sfm_data", ".bin"),
-			ESfM_Data(ALL));
-
-		Save(sfmEngine.Get_SfM_Data(),
-			stlplus::create_filespec(sOutputDir, "cloud_and_poses", ".ply"),
-			ESfM_Data(ALL));
-
-		return EXIT_SUCCESS;
-	}
-
-	return EXIT_SUCCESS;
-}
-
-int CSFM::incrementalSfM()
-{
-	std::ofstream out(recordfile, ios::app);
-	const cameras::Intrinsic_Parameter_Type intrinsic_refinement_options =
-		cameras::StringTo_Intrinsic_Parameter_Type(sIntrinsic_refinement_options);
-	if (intrinsic_refinement_options == static_cast<cameras::Intrinsic_Parameter_Type>(0))
-	{
-		std::cout << "Invalid input for Bundle Adjusment Intrinsic parameter refinement option" << std::endl;
-		return EXIT_FAILURE;
-	}
-	if (!Load(sfm_data, sSfM_Data_Filename, ESfM_Data(VIEWS | INTRINSICS))) {
-		std::cout << std::endl
-			<< "The input SfM_Data file \"" << sSfM_Data_Filename << "\" cannot be read." << std::endl;
-		return EXIT_FAILURE;
-	}
-	
-	// Init the regions_type from the image describer file (used for image regions extraction)
-	using namespace openMVG::features;
-	const std::string sImage_describer = stlplus::create_filespec(sOutputDir, "image_describer", "json");
-	std::unique_ptr<Regions> regions_type = Init_region_type_from_file(sImage_describer);
-	if (!regions_type)
-	{
-		std::cout << "Invalid: "
-			<< sImage_describer << " regions type file." << std::endl;
-		return EXIT_FAILURE;
-	}
-
-	// Features reading
-	std::shared_ptr<Features_Provider> feats_provider = std::make_shared<Features_Provider>();
-	if (!feats_provider->load(sfm_data, sOutputDir, regions_type)) {
-		std::cout << std::endl
-			<< "Invalid features." << std::endl;
-		return EXIT_FAILURE;
-	}
-	// Matches reading
-	std::shared_ptr<Matches_Provider> matches_provider = std::make_shared<Matches_Provider>();
-	if // Try to read the provided match filename or the default one (matches.f.txt/bin)
-		(
-			!(matches_provider->load(sfm_data, sMatchFilename) ||
-				matches_provider->load(sfm_data, stlplus::create_filespec(sOutputDir, "matches.f.bin")) ||
-				matches_provider->load(sfm_data, stlplus::create_filespec(sOutputDir, "matches.e.bin")))
-			)
-	{
-		std::cout << std::endl
-			<< "Invalid matches file." << std::endl;
-		return EXIT_FAILURE;
-	}
-	openMVG::system::Timer timer;
-	SequentialSfMReconstructionEngine sfmEngine(
-		sfm_data,
-		sOutputDir,
-		stlplus::create_filespec(sOutputDir, "Reconstruction_Report.html"));
-
-	// Configure the features_provider & the matches_provider
-	sfmEngine.SetFeaturesProvider(feats_provider.get());
-	sfmEngine.SetMatchesProvider(matches_provider.get());
-
-	// Configure reconstruction parameters
-	sfmEngine.Set_Intrinsics_Refinement_Type(intrinsic_refinement_options);
-	sfmEngine.SetUnknownCameraType(EINTRINSIC(i_User_camera_model));
-	sfmEngine.Set_Use_Motion_Prior(b_use_motion_priors);
-
-	// Handle Initial pair parameter
-	if (!initialPairString.first.empty() && !initialPairString.second.empty())
-	{
-		Pair initialPairIndex;
-		if (!computeIndexFromImageNames(sfm_data, initialPairString, initialPairIndex))
+		SfM_Data sfm_data_single;
+		// 1. Fill the  single sfm_data scene with view, intrinsic
+		for (int i=0;i<station_num;i++)
 		{
-			std::cout << "Could not find the initial pairs <" << initialPairString.first
-				<< ", " << initialPairString.second << ">!\n";
+			int view_id = cam*station_num + i;
+			int intrinsic_id = sfm_data.GetViews().at(view_id)->id_intrinsic;
+			int pose_id= sfm_data.GetViews().at(view_id)->id_pose;
+			sfm_data_single.views.insert(*(sfm_data.GetViews().find(view_id)));
+			sfm_data_single.intrinsics.insert(*(sfm_data.GetIntrinsics().find(intrinsic_id)));
+		}
+		
+		if (sfm_data_single.views.size() != station_num)
+		{
+			std::cout << "Not valid sfm_data part!!!" << std::endl;
 			return EXIT_FAILURE;
 		}
-		sfmEngine.setInitialPair(initialPairIndex);
+
+		// 2. Begin the single globalsfm
+		openMVG::system::Timer timer;
+		GlobalSfMReconstructionEngine_RelativeMotions sfmEngine(
+			sfm_data_single,
+			sOutputDir,
+			stlplus::create_filespec(sOutputDir, "Reconstruction_Report.html"));
+
+		// Features reading
+		std::shared_ptr<Features_Provider> feats_provider = std::make_shared<Features_Provider>();
+		if (!feats_provider->load(sfm_data_single, sOutputDir, regions_type)) {
+			std::cout << std::endl
+				<< "Invalid features." << std::endl;
+			return EXIT_FAILURE;
+		}
+		// Matches reading
+		std::shared_ptr<Matches_Provider> matches_provider = std::make_shared<Matches_Provider>();
+		if // Try to read the provided match filename or the default one (matches.e.txt/bin)
+			(
+				!(matches_provider->load(sfm_data_single, sMatchFilename) ||
+					matches_provider->load(sfm_data_single, stlplus::create_filespec(sOutputDir, "matches.e.bin")) ||
+					matches_provider->load(sfm_data_single, stlplus::create_filespec(sOutputDir, "matches.f.bin")))
+				)
+		{
+			std::cout << std::endl
+				<< "Invalid matches file." << std::endl;
+			return EXIT_FAILURE;
+		}
+
+		// Configure the features_provider & the matches_provider
+		sfmEngine.SetFeaturesProvider(feats_provider.get());
+		sfmEngine.SetMatchesProvider(matches_provider.get());
+
+		// Configure reconstruction parameters
+		sfmEngine.Set_Intrinsics_Refinement_Type(intrinsic_refinement_options);
+
+		sfmEngine.Set_Use_Motion_Prior(b_use_motion_priors);
+
+		// Configure motion averaging method
+		sfmEngine.SetRotationAveragingMethod(
+			ERotationAveragingMethod(iRotationAveragingMethod));
+		sfmEngine.SetTranslationAveragingMethod(
+			ETranslationAveragingMethod(iTranslationAveragingMethod));
+
+		if (sfmEngine.Process())
+		{
+			std::cout << std::endl << " Total Ac-Global-Sfm for this cam group took (s): " << timer.elapsed() << std::endl;
+
+			std::cout << "...Generating SfM_Report.html" << std::endl;
+			Generate_SfM_Report(sfmEngine.Get_SfM_Data(),
+				stlplus::create_filespec(sOutputDir, "SfMReconstruction_Report_for_cam"+to_string(cam)+".html"));
+
+			//-- Export to disk computed scene (data & visualizable results)
+			std::cout << "...Export SfM_Data to disk." << std::endl;
+			Save(sfmEngine.Get_SfM_Data(),
+				stlplus::create_filespec(sOutputDir, "sfm_data_for_cam_"+to_string(cam), ".bin"),
+				ESfM_Data(ALL));
+
+			Save(sfmEngine.Get_SfM_Data(),
+				stlplus::create_filespec(sOutputDir, "cloud_and_poses_for_cam_" + to_string(cam), ".ply"),
+				ESfM_Data(ALL));
+		}
+		else
+		{
+			std::cout << "Failed during sfmEngine for cam"<<to_string(cam)<<" processing!!!" << std::endl;
+			continue;
+		}
+		
+		//3.Integrate the single sfm_data scene poses and structure into the global sfm_data scene poses
+		for (auto & pose_it : sfmEngine.Get_SfM_Data().GetPoses())
+			sfm_data.poses[pose_it.first] = pose_it.second;
+		std::cout << "After Cam_" << to_string(cam) << " global sfm, poses size:" << sfm_data.poses.size() << std::endl;
+
+		for (auto & landmark_it : sfmEngine.Get_SfM_Data().GetLandmarks())
+		{
+			int landmark_id = sfm_data.structure.size();
+			Landmark landmark = landmark_it.second;
+			sfm_data.structure[landmark_id]=landmark;
+		}
+		std::cout << "After Cam_" << to_string(cam) << " global sfm, structure size:" << sfm_data.structure.size() << std::endl;
 	}
 
-	if (sfmEngine.Process())
-	{
-		std::cout << std::endl << " Total Ac-Sfm took (s): " << timer.elapsed() << std::endl;
+	Save(sfm_data,
+		stlplus::create_filespec(sOutputDir, "sfm_data_intial", ".bin"),
+		ESfM_Data(ALL));
 
-		std::cout << "...Generating SfM_Report.html" << std::endl;
-		Generate_SfM_Report(sfmEngine.Get_SfM_Data(),
-			stlplus::create_filespec(sOutputDir, "SfMReconstruction_Report.html"));
-
-		//-- Export to disk computed scene (data & visualizable results)
-		std::cout << "...Export SfM_Data to disk." << std::endl;
-		Save(sfmEngine.Get_SfM_Data(),
-			stlplus::create_filespec(sOutputDir, "sfm_data", ".bin"),
-			ESfM_Data(ALL));
-
-		Save(sfmEngine.Get_SfM_Data(),
-			stlplus::create_filespec(sOutputDir, "sfm_data_poses", ".ply"),
-			ESfM_Data(EXTRINSICS));
-
-		Save(sfmEngine.Get_SfM_Data(),
-			stlplus::create_filespec(sOutputDir, "cloud_and_poses", ".ply"),
-			ESfM_Data(ALL));
-
-		return EXIT_SUCCESS;
-	}
-	
 	return EXIT_SUCCESS;
 }
 
-int CSFM::incrementalSfM2()
+int CSFM::incrementalMCSfM2()
 {
 	std::ofstream out(recordfile, ios::app);
 	std::cout << "Sequential/Incremental reconstruction (Engine 2)" << std::endl
@@ -2062,1089 +1290,794 @@ int CSFM::incrementalSfM2()
 		return EXIT_FAILURE;
 	}
 
-	// Features reading
-	std::shared_ptr<Features_Provider> feats_provider = std::make_shared<Features_Provider>();
-	if (!feats_provider->load(sfm_data, sOutputDir, regions_type)) {
-		std::cout << std::endl
-			<< "Invalid features." << std::endl;
-		return EXIT_FAILURE;
-	}
-	// Matches reading
-	std::shared_ptr<Matches_Provider> matches_provider = std::make_shared<Matches_Provider>();
-	if // Try to read the provided match filename or the default one (matches.f.txt/bin)
-		(
-			!(matches_provider->load(sfm_data, sMatchFilename) ||
-				matches_provider->load(sfm_data, stlplus::create_filespec(sOutputDir, "matches.f.bin")) ||
-				matches_provider->load(sfm_data, stlplus::create_filespec(sOutputDir, "matches.e.bin")))
-			)
-	{
-		std::cout << std::endl
-			<< "Invalid matches file." << std::endl;
-		return EXIT_FAILURE;
-	}
+	
 	// Sequential reconstruction process
   //---------------------------------------
-
-	openMVG::system::Timer timer;
-
-	std::unique_ptr<SfMSceneInitializer> scene_initializer;
-	switch (scene_initializer_enum)
+	station_num = sfm_data.views.size() / Group_camera_num;
+	for (int cam = 0; cam < Group_camera_num; cam++)
 	{
-	case ESfMSceneInitializer::INITIALIZE_AUTO_PAIR:
-		std::cout << "Not yet implemented." << std::endl;
-		return EXIT_FAILURE;
-		break;
-	case ESfMSceneInitializer::INITIALIZE_MAX_PAIR:
-		scene_initializer.reset(new SfMSceneInitializerMaxPair(sfm_data,
-			feats_provider.get(),
-			matches_provider.get()));
-		break;
-	case ESfMSceneInitializer::INITIALIZE_EXISTING_POSES:
-		scene_initializer.reset(new SfMSceneInitializer(sfm_data,
-			feats_provider.get(),
-			matches_provider.get()));
-		break;
-	case ESfMSceneInitializer::INITIALIZE_STELLAR:
-		scene_initializer.reset(new SfMSceneInitializerStellar(sfm_data,
-			feats_provider.get(),
-			matches_provider.get()));
-		break;
-	default:
-		return EXIT_FAILURE;
+		SfM_Data sfm_data_single;
+		// 1. Fill the  single sfm_data scene with view, intrinsic
+		for (int i = 0; i < station_num; i++)
+		{
+			int view_id = cam*station_num + i;
+			int intrinsic_id = sfm_data.GetViews().at(view_id)->id_intrinsic;
+			int pose_id = sfm_data.GetViews().at(view_id)->id_pose;
+			sfm_data_single.views.insert(*(sfm_data.GetViews().find(view_id)));
+			sfm_data_single.intrinsics.insert(*(sfm_data.GetIntrinsics().find(intrinsic_id)));
+		}
+
+		if (sfm_data_single.views.size() != station_num)
+		{
+			std::cout << "Not valid sfm_data part!!!" << std::endl;
+			return EXIT_FAILURE;
+		}
+		// Features reading
+		std::shared_ptr<Features_Provider> feats_provider = std::make_shared<Features_Provider>();
+		if (!feats_provider->load(sfm_data_single, sOutputDir, regions_type)) {
+			std::cout << std::endl
+				<< "Invalid features." << std::endl;
+			return EXIT_FAILURE;
+		}
+		// Matches reading
+		std::shared_ptr<Matches_Provider> matches_provider = std::make_shared<Matches_Provider>();
+		if // Try to read the provided match filename or the default one (matches.e.txt/bin)
+			(
+				!(matches_provider->load(sfm_data_single, sMatchFilename) ||
+					matches_provider->load(sfm_data_single, stlplus::create_filespec(sOutputDir, "matches.e.bin")) ||
+					matches_provider->load(sfm_data_single, stlplus::create_filespec(sOutputDir, "matches.f.bin")))
+				)
+		{
+			std::cout << std::endl
+				<< "Invalid matches file." << std::endl;
+			return EXIT_FAILURE;
+		}
+		openMVG::system::Timer timer;
+
+		std::unique_ptr<SfMSceneInitializer> scene_initializer;
+		switch (scene_initializer_enum)
+		{
+		case ESfMSceneInitializer::INITIALIZE_AUTO_PAIR:
+			std::cout << "Not yet implemented." << std::endl;
+			return EXIT_FAILURE;
+			break;
+		case ESfMSceneInitializer::INITIALIZE_MAX_PAIR:
+			scene_initializer.reset(new SfMSceneInitializerMaxPair(sfm_data_single,
+				feats_provider.get(),
+				matches_provider.get()));
+			break;
+		case ESfMSceneInitializer::INITIALIZE_EXISTING_POSES:
+			scene_initializer.reset(new SfMSceneInitializer(sfm_data_single,
+				feats_provider.get(),
+				matches_provider.get()));
+			break;
+		case ESfMSceneInitializer::INITIALIZE_STELLAR:
+			scene_initializer.reset(new SfMSceneInitializerStellar(sfm_data_single,
+				feats_provider.get(),
+				matches_provider.get()));
+			break;
+		default:
+			return EXIT_FAILURE;
+		}
+		if (!scene_initializer)
+		{
+			std::cout << "Invalid scene initializer." << std::endl;
+			return EXIT_FAILURE;
+		}
+
+		SequentialSfMReconstructionEngine2 sfmEngine(
+			scene_initializer.get(),
+			sfm_data_single,
+			sOutputDir,
+			stlplus::create_filespec(sOutputDir, "Reconstruction_Report.html"));
+
+		// Configure the features_provider & the matches_provider
+		sfmEngine.SetFeaturesProvider(feats_provider.get());
+		sfmEngine.SetMatchesProvider(matches_provider.get());
+
+		// Configure reconstruction parameters
+		sfmEngine.Set_Intrinsics_Refinement_Type(intrinsic_refinement_options);
+		sfmEngine.SetUnknownCameraType(EINTRINSIC(i_User_camera_model));
+		sfmEngine.Set_Use_Motion_Prior(b_use_motion_priors);
+
+		if (sfmEngine.Process())
+		{
+			std::cout << std::endl << " Total Ac-Sfm took (s): " << timer.elapsed() << std::endl;
+			//-- Export to disk computed scene (data & visualizable results)
+			std::cout << "...Export SfM_Data to disk." << std::endl;
+			Save(sfmEngine.Get_SfM_Data(),
+				stlplus::create_filespec(sOutputDir, "sfm_data_for_cam_" + to_string(cam), ".bin"),
+				ESfM_Data(ALL));
+
+			Save(sfmEngine.Get_SfM_Data(),
+				stlplus::create_filespec(sOutputDir, "cloud_and_poses_for_cam_" + to_string(cam), ".ply"),
+				ESfM_Data(ALL));
+		}
+		else
+		{
+			std::cout << "Failed during sfmEngine for cam" << to_string(cam) << " processing!!!" << std::endl;
+			continue;
+		}
+
+		//3.Integrate the single sfm_data scene poses and structure into the global sfm_data scene poses
+		for (auto & pose_it : sfmEngine.Get_SfM_Data().GetPoses())
+			sfm_data.poses[pose_it.first] = pose_it.second;
+		std::cout << "After Cam_" << to_string(cam) << " global sfm, poses size:" << sfm_data.poses.size() << std::endl;
+
+		for (auto & landmark_it : sfmEngine.Get_SfM_Data().GetLandmarks())
+		{
+			int landmark_id = sfm_data.structure.size();
+			Landmark landmark = landmark_it.second;
+			sfm_data.structure[landmark_id] = landmark;
+		}
+		std::cout << "After Cam_" << to_string(cam) << " global sfm, structure size:" << sfm_data.structure.size() << std::endl;
 	}
-	if (!scene_initializer)
-	{
-		std::cout << "Invalid scene initializer." << std::endl;
-		return EXIT_FAILURE;
-	}
 
-	SequentialSfMReconstructionEngine2 sfmEngine(
-		scene_initializer.get(),
-		sfm_data,
-		sOutputDir,
-		stlplus::create_filespec(sOutputDir, "Reconstruction_Report.html"));
-
-	// Configure the features_provider & the matches_provider
-	sfmEngine.SetFeaturesProvider(feats_provider.get());
-	sfmEngine.SetMatchesProvider(matches_provider.get());
-
-	// Configure reconstruction parameters
-	sfmEngine.Set_Intrinsics_Refinement_Type(intrinsic_refinement_options);
-	sfmEngine.SetUnknownCameraType(EINTRINSIC(i_User_camera_model));	
-	sfmEngine.Set_Use_Motion_Prior(b_use_motion_priors);
-
-	if (sfmEngine.Process())
-	{
-		std::ofstream out(recordfile);
-		std::cout << std::endl << " Total Ac-Sfm took (s): " << timer.elapsed() << std::endl;
-		out << std::endl << " Total Ac-Sfm took (s): " << timer.elapsed() << std::endl;
-		//-- Export to disk computed scene (data & visualizable results)
-		std::cout << "...Export SfM_Data to disk." << std::endl;
-		Save(sfmEngine.Get_SfM_Data(),
-			stlplus::create_filespec(sOutputDir, "sfm_data", ".bin"),
-			ESfM_Data(ALL));
-
-		Save(sfmEngine.Get_SfM_Data(),
-			stlplus::create_filespec(sOutputDir, "cloud_and_poses", ".ply"),
-			ESfM_Data(ALL));
-
-		out << " SfM_Data:" << "\n"
-			<< " #views: " << sfm_data.views.size() << "\n"
-			<< " #poses: " << sfmEngine.Get_SfM_Data().poses.size() << "\n";
-
-		return EXIT_FAILURE;
-	}
-
+	Save(sfm_data,
+		stlplus::create_filespec(sOutputDir, "sfm_data_intial", ".bin"),
+		ESfM_Data(ALL));
 	return EXIT_SUCCESS;
 }
 
-bool CSFM::Initial_calibration(std::vector<Pose3>& relative_poses,int main_cam,int stations)
+bool CSFM::Evaluate_InitialPoses()
 {
-	//用平均偏移量作为标定值
-			std::vector<Vec3> cen_sum;
-			cen_sum.resize(Group_camera_num, Vec3(0.0, 0.0, 0.0));
-			std::vector<Vec4> quat_sum;
-			quat_sum.resize(Group_camera_num, Vec4(0.0, 0.0, 0.0, 0.0));
-			std::map<openMVG::IndexT, std::vector<Pose3>> relative_poses_groups;
-			for (int j= 0; j < stations; j++)
-				for (int i = 0; i < Group_camera_num; i++)
-					relative_poses_groups[j].push_back(Pose3());
+	string sfm_Data_Filename = stlplus::create_filespec(sOutputDir, "sfm_data_intial", ".bin");
+	if (!Load(sfm_data, sfm_Data_Filename, ESfM_Data(ALL))) {
+		std::cout << std::endl
+			<< "The input SfM_Data file \"" << sfm_Data_Filename << "\" cannot be read." << std::endl;
+		return EXIT_FAILURE;
+	}
+	std::cout << std::endl
+		<< "The input SfM_Data file \n" 
+		<< " #views: " << sfm_data.views.size() << "\n"
+		<< " #poses: " << sfm_data.poses.size() << "\n"
+		<< " #intrinsics: " << sfm_data.intrinsics.size() << "\n"
+		<< " #tracks: " << sfm_data.structure.size() << "\n"
+		<< std::endl;
 
-			for (const auto & view_it:sfm_data.views)
-			{
-				int cam_id = 0 ,station = 0, main_pose_id = 0;
-				if (b_views_grouped)
-				{
-					cam_id = (int)view_it.first%Group_camera_num;
-					station = (int)view_it.first / Group_camera_num;
-					main_pose_id = station*Group_camera_num + main_cam;
-				}
-				else
-				{
-					cam_id = (int)view_it.first / stations;
-					station = (int)view_it.first%stations;
-					main_pose_id = main_cam*stations +station;
-				}
-				Pose3 main_cam_pose = sfm_data.GetPoses().at(main_pose_id);
-				if (cam_id==main_cam)
-					continue;
-				else
-				{
-					Pose3 pose = sfm_data.GetPoseOrDie(view_it.second.get());
-					Vec3 trans = pose.center() - main_cam_pose.center();
-					Mat3 rot = pose.rotation()*(main_cam_pose.rotation().transpose());
-					relative_poses_groups[station][cam_id]=Pose3(rot, trans);
-				}
-			}
-
-			for (int i=0;i<Group_camera_num;i++)
-			{
-				for (int j = 0; j <stations ; j++)
-				{
-					cen_sum[i] = cen_sum[i] + relative_poses_groups[j][i].center();
-					Eigen::Matrix3d rot_i = relative_poses_groups[j][i].rotation();
-					Eigen::Quaterniond quat(rot_i);
-					quat_sum[i] = quat_sum[i] + Vec4(quat.x(), quat.y(), quat.z(), quat.w());
-				}
-			}
-			std::cout << "cen_sum" <<cen_sum[main_cam] << std::endl;
-
-			relative_poses.resize(Group_camera_num, Pose3());
-			for (int i = 0; i < Group_camera_num; i++)
-			{
-				if (i==main_cam)
-					continue;
-				Vec3 relative_t_average = cen_sum[i] / relative_poses_groups.size();
-				Vec4 relative_q_average = quat_sum[i] / relative_poses_groups.size();
-				Eigen::Quaterniond quat_average(relative_q_average);
-				Mat3 relative_r_average = quat_average.toRotationMatrix();
-				relative_poses[i] = Pose3(relative_r_average, relative_t_average);
-				const double angularErrorDegree = R2D(getRotationMagnitude(relative_r_average));
-				std::cout << "Camera" << i << ": " << std::endl;
-				std::cout << "Translation:" << relative_t_average[0] << "," << relative_t_average[1] << "," << relative_t_average[2] << std::endl;
-				std::cout << "Rotation:" << relative_r_average(0, 0) << "," << relative_r_average(0, 1) << "," << relative_r_average(0, 2) << ","
-					<< relative_r_average(1, 0) << "," << relative_r_average(1, 1) << "," << relative_r_average(1, 2) << ","
-					<< relative_r_average(2, 0) << "," << relative_r_average(2, 1) << "," << relative_r_average(2, 2) << std::endl;
-				std::cout << "AngularRelativeDegree:" << angularErrorDegree << std::endl;
-				std::cout << std::endl;
-			}
-
-			return relative_poses.size() == Group_camera_num;
-}
-
-bool CSFM::Evaluate_InitialPoses(int stations)
-{
-	//七目镜头有些影像必然会丢矢
-	//用其他全定向成功的站来推测丢失影像的位姿
-
-	//相对关系矩阵
-	//按照（i,j),i<j构建上三角矩阵存储平均值
-	std::cout << ".........................Evaluating poses from known poses..................." << std::endl;
-	std::map<std::pair<int, int>, std::vector<geometry::Pose3>> cam_cali_sum;
-	std::map<std::pair<int, int>, geometry::Pose3> cam_cali;
-
-	//遍历每一站
-	for (int s = 0; s < stations; s++)
+	//Station matrix information
+	std::vector<std::vector<bool>> station_info ;
+	vector<int> all_valid_station;
+	for (int i = 0; i < station_num; i++)
 	{
-		for (int cam_i = 0; cam_i < Group_camera_num; cam_i++)
-			for (int cam_j = cam_i; cam_j < Group_camera_num; cam_j++)
+		std::vector<bool> valid_cams;
+		valid_cams.resize(Group_camera_num, 0);
+		int valid_cam_nums = 0;
+		for (int cam = 0; cam < Group_camera_num; cam++)
+		{
+			int view_id = cam*station_num + i;
+			const View* view = sfm_data.GetViews().at(view_id).get();
+			if (sfm_data.IsPoseAndIntrinsicDefined(view))
 			{
-				if (cam_i == cam_j)
-					cam_cali_sum[std::make_pair(cam_i, cam_j)].push_back(geometry::Pose3());
-				else
-				{
-					View* view_I;
-					View* view_J;
-					if (b_views_grouped)
-					{
-						view_I = sfm_data.GetViews().at(cam_i+ s*Group_camera_num).get();
-						view_J = sfm_data.GetViews().at(cam_j +s*Group_camera_num).get();
-					}
-					else 
-					{
-						view_I = sfm_data.GetViews().at(cam_i*stations + s).get();
-						view_J = sfm_data.GetViews().at(cam_j*stations + s).get();
-					}
-
-					if (sfm_data.IsPoseAndIntrinsicDefined(view_I) && sfm_data.IsPoseAndIntrinsicDefined(view_J))
-					{
-						Pose3 pose_I = sfm_data.GetPoseOrDie(view_I);
-						Pose3 pose_J = sfm_data.GetPoseOrDie(view_J);
-						Vec3 trans = pose_J.center() - pose_I.center();
-						Mat3 rot = pose_J.rotation()*(pose_I.rotation().transpose());
-						cam_cali_sum[std::make_pair(cam_i, cam_j)].push_back(geometry::Pose3(rot, trans));
-					}
-					else
-						continue;
-				}
+				valid_cams[cam] = 1;
+				valid_cam_nums += 1;
 			}
+		}
+		station_info.push_back(valid_cams);
+		if (valid_cam_nums == Group_camera_num)
+			all_valid_station.push_back(i);
+	}
+	//Show station information matrix
+	for (int s = 0; s < station_info.size(); s++)
+	{
+		for (int c = 0; c < Group_camera_num; c++)
+			std::cout << station_info[s][c];
+		std::cout << endl;
 	}
 	
-	//再针对每一对关系求平均
-	for (int cam_i = 0; cam_i < Group_camera_num; cam_i++)
-		for (int cam_j = cam_i; cam_j < Group_camera_num; cam_j++)
-		{
-			if (cam_i == cam_j)
-				cam_cali[std::make_pair(cam_i, cam_j)] = Pose3();
-			else
-			{
-				//如果任何一个相对关系为空则返回false
-				if (cam_cali_sum[std::make_pair(cam_i, cam_j)].empty())
-					return false;
-
-				//求poses的平均值
-				Vec3 cen_sum=Vec3(0,0,0);
-				Vec4 quat_sum= Vec4(0.0, 0.0, 0.0, 0.0);
-				std::cout << "cam_cali_sum[(" << cam_i << "," << cam_j << ")].size()=" << cam_cali_sum[std::make_pair(cam_i, cam_j)].size() << std::endl;
-				for (int count = 0; count < cam_cali_sum[std::make_pair(cam_i, cam_j)].size(); count++)
-				{
-					cen_sum+= cam_cali_sum[std::make_pair(cam_i, cam_j)][count].center();
-					Eigen::Matrix3d rot_i = cam_cali_sum[std::make_pair(cam_i, cam_j)][count].rotation();
-					Eigen::Quaterniond quat(rot_i);
-					quat_sum+= Vec4(quat.x(), quat.y(), quat.z(), quat.w());
-				}
-				Vec3 relative_t_average = cen_sum / cam_cali_sum[std::make_pair(cam_i, cam_j)].size();
-				Vec4 relative_q_average = quat_sum / cam_cali_sum[std::make_pair(cam_i, cam_j)].size();
-				Eigen::Quaterniond quat_average(relative_q_average);
-				Mat3 relative_r_average = quat_average.toRotationMatrix();
-				cam_cali[std::make_pair(cam_i, cam_j)] = Pose3(relative_r_average, relative_t_average);
-			}
-		}
-	
-	//然后遍历没有pose的view，估计它们的位姿
-	std::cout << "Get views without poses and give them evaluated average values............" <<std::endl;
-	for (const auto & view_it : sfm_data.views)
-	{
-		if (sfm_data.IsPoseAndIntrinsicDefined(view_it.second.get()))
-			continue;
-		int cam_id = 0;
-		int cam_station = 0;
-		std::vector<std::pair<int,int>> near_camid_views;
-		if (b_views_grouped)
-		{
-			cam_id = (int)view_it.first%Group_camera_num;
-			cam_station = (int)view_it.first / Group_camera_num;
-			for (int cam_i = 0; cam_i < Group_camera_num; cam_i++)
-				near_camid_views.push_back(std::make_pair(cam_i, cam_station*Group_camera_num + cam_i));
-		}
-		else
-		{
-			cam_id = view_it.first / stations;
-			cam_station = view_it.first%stations; 
-			for (int cam_i = 0; cam_i < Group_camera_num; cam_i++)
-				near_camid_views.push_back(std::make_pair(cam_i, cam_i*stations + cam_station));
-		}
-		std::cout << "Cam_id to evaluating:" << cam_id << " and near_camid_views.size()=" << near_camid_views.size() << std::endl;
-		std::vector<Pose3> evaluated_poses;
-		
-		for (int i=0;i<near_camid_views.size();i++)
-		{
-			View* v = sfm_data.views.at(near_camid_views[i].second).get();
-			if (!sfm_data.IsPoseAndIntrinsicDefined(v))
-			{
-				std::cout << "near views :" << v->id_view << " also doesn't have a difined pose!!" << std::endl;
-				continue;
-			}
-			
-			if (near_camid_views[i].first <= cam_id)
-			{
-				Pose3 cam_i_pose = sfm_data.GetPoseOrDie(v);
-				std::cout << "pose_id:" << v->id_pose << ",and pose.center is" << cam_i_pose.center()[0] << " " << cam_i_pose.center()[1] << " " << cam_i_pose.center()[2] << endl;
-				Pose3 relative_pose = cam_cali[std::make_pair(near_camid_views[i].first, cam_id)];
-				Pose3 cam_id_pose = Pose3(relative_pose.rotation()*cam_i_pose.rotation(), cam_i_pose.center() + relative_pose.center());
-				evaluated_poses.push_back(cam_id_pose);
-			}
-			else
-			{
-				Pose3 cam_i_pose = sfm_data.GetPoseOrDie(v);
-				std::cout << "pose_id:" << v->id_pose << ",and pose.center is" << cam_i_pose.center()[0] << " " << cam_i_pose.center()[1] << " " << cam_i_pose.center()[2] << endl;
-				Pose3 relative_pose = cam_cali[std::make_pair(cam_id, near_camid_views[i].first)];
-				Pose3 cam_id_pose = Pose3((relative_pose.rotation().transpose())*cam_i_pose.rotation(), cam_i_pose.center() - relative_pose.center());
-				evaluated_poses.push_back(cam_id_pose);
-			}
-		}
-		if (evaluated_poses.size() < 1)
-			return false;
-		//取平均值
-		//求poses的平均值
-		Vec3 pcen_sum = Vec3(0, 0, 0);
-		Vec4 pquat_sum = Vec4(0.0, 0.0, 0.0, 0.0);
-		for (int i = 0; i <evaluated_poses.size() ; i++)
-		{
-			pcen_sum += evaluated_poses[i].center();
-			Eigen::Matrix3d prot_i = evaluated_poses[i].rotation();
-			Eigen::Quaterniond pquat(prot_i);
-			pquat_sum += Vec4(pquat.x(), pquat.y(), pquat.z(), pquat.w());
-		}
-		Vec3 prelative_t_average = pcen_sum / evaluated_poses.size();
-		Vec4 prelative_q_average = pquat_sum / evaluated_poses.size();
-		Eigen::Quaterniond pquat_average(prelative_q_average);
-		Mat3 prelative_r_average = pquat_average.toRotationMatrix();
-		sfm_data.poses[view_it.second->id_pose]= Pose3(prelative_r_average, prelative_t_average);
-		std::cout << "Evaluated pose_id:" << view_it.second->id_pose << ",and the pose.center() is" << prelative_t_average << endl;
-	}
-	return sfm_data.views.size()==sfm_data.poses.size();
+	//Show how many station having all lens pose
+	std::cout << "all_valid_staion Num:" << all_valid_station.size() << std::endl;
+	return true;
 }
+//bool CSFM::Initial_calibration(std::vector<Pose3>& relative_poses,int main_cam,int stations)
+//{
+//	//用平均偏移量作为标定值
+//			std::vector<Vec3> cen_sum;
+//			cen_sum.resize(Group_camera_num, Vec3(0.0, 0.0, 0.0));
+//			std::vector<Vec4> quat_sum;
+//			quat_sum.resize(Group_camera_num, Vec4(0.0, 0.0, 0.0, 0.0));
+//			std::map<openMVG::IndexT, std::vector<Pose3>> relative_poses_groups;
+//			for (int j= 0; j < stations; j++)
+//				for (int i = 0; i < Group_camera_num; i++)
+//					relative_poses_groups[j].push_back(Pose3());
+//
+//			for (const auto & view_it:sfm_data.views)
+//			{
+//				int cam_id = 0 ,station = 0, main_pose_id = 0;
+//				if (b_views_grouped)
+//				{
+//					cam_id = (int)view_it.first%Group_camera_num;
+//					station = (int)view_it.first / Group_camera_num;
+//					main_pose_id = station*Group_camera_num + main_cam;
+//				}
+//				else
+//				{
+//					cam_id = (int)view_it.first / stations;
+//					station = (int)view_it.first%stations;
+//					main_pose_id = main_cam*stations +station;
+//				}
+//				Pose3 main_cam_pose = sfm_data.GetPoses().at(main_pose_id);
+//				if (cam_id==main_cam)
+//					continue;
+//				else
+//				{
+//					Pose3 pose = sfm_data.GetPoseOrDie(view_it.second.get());
+//					Vec3 trans = pose.center() - main_cam_pose.center();
+//					Mat3 rot = pose.rotation()*(main_cam_pose.rotation().transpose());
+//					relative_poses_groups[station][cam_id]=Pose3(rot, trans);
+//				}
+//			}
+//
+//			for (int i=0;i<Group_camera_num;i++)
+//			{
+//				for (int j = 0; j <stations ; j++)
+//				{
+//					cen_sum[i] = cen_sum[i] + relative_poses_groups[j][i].center();
+//					Eigen::Matrix3d rot_i = relative_poses_groups[j][i].rotation();
+//					Eigen::Quaterniond quat(rot_i);
+//					quat_sum[i] = quat_sum[i] + Vec4(quat.x(), quat.y(), quat.z(), quat.w());
+//				}
+//			}
+//			std::cout << "cen_sum" <<cen_sum[main_cam] << std::endl;
+//
+//			relative_poses.resize(Group_camera_num, Pose3());
+//			for (int i = 0; i < Group_camera_num; i++)
+//			{
+//				if (i==main_cam)
+//					continue;
+//				Vec3 relative_t_average = cen_sum[i] / relative_poses_groups.size();
+//				Vec4 relative_q_average = quat_sum[i] / relative_poses_groups.size();
+//				Eigen::Quaterniond quat_average(relative_q_average);
+//				Mat3 relative_r_average = quat_average.toRotationMatrix();
+//				relative_poses[i] = Pose3(relative_r_average, relative_t_average);
+//				const double angularErrorDegree = R2D(getRotationMagnitude(relative_r_average));
+//				std::cout << "Camera" << i << ": " << std::endl;
+//				std::cout << "Translation:" << relative_t_average[0] << "," << relative_t_average[1] << "," << relative_t_average[2] << std::endl;
+//				std::cout << "Rotation:" << relative_r_average(0, 0) << "," << relative_r_average(0, 1) << "," << relative_r_average(0, 2) << ","
+//					<< relative_r_average(1, 0) << "," << relative_r_average(1, 1) << "," << relative_r_average(1, 2) << ","
+//					<< relative_r_average(2, 0) << "," << relative_r_average(2, 1) << "," << relative_r_average(2, 2) << std::endl;
+//				std::cout << "AngularRelativeDegree:" << angularErrorDegree << std::endl;
+//				std::cout << std::endl;
+//			}
+//
+//			return relative_poses.size() == Group_camera_num;
+//}
+
+//bool CSFM::Evaluate_InitialPoses(int stations)
+//{
+//	//七目镜头有些影像必然会丢矢
+//	//用其他全定向成功的站来推测丢失影像的位姿
+//
+//	//相对关系矩阵
+//	//按照（i,j),i<j构建上三角矩阵存储平均值
+//	std::cout << ".........................Evaluating poses from known poses..................." << std::endl;
+//	std::map<std::pair<int, int>, std::vector<geometry::Pose3>> cam_cali_sum;
+//	std::map<std::pair<int, int>, geometry::Pose3> cam_cali;
+//
+//	//遍历每一站
+//	for (int s = 0; s < stations; s++)
+//	{
+//		for (int cam_i = 0; cam_i < Group_camera_num; cam_i++)
+//			for (int cam_j = cam_i; cam_j < Group_camera_num; cam_j++)
+//			{
+//				if (cam_i == cam_j)
+//					cam_cali_sum[std::make_pair(cam_i, cam_j)].push_back(geometry::Pose3());
+//				else
+//				{
+//					View* view_I;
+//					View* view_J;
+//					if (b_views_grouped)
+//					{
+//						view_I = sfm_data.GetViews().at(cam_i+ s*Group_camera_num).get();
+//						view_J = sfm_data.GetViews().at(cam_j +s*Group_camera_num).get();
+//					}
+//					else 
+//					{
+//						view_I = sfm_data.GetViews().at(cam_i*stations + s).get();
+//						view_J = sfm_data.GetViews().at(cam_j*stations + s).get();
+//					}
+//
+//					if (sfm_data.IsPoseAndIntrinsicDefined(view_I) && sfm_data.IsPoseAndIntrinsicDefined(view_J))
+//					{
+//						Pose3 pose_I = sfm_data.GetPoseOrDie(view_I);
+//						Pose3 pose_J = sfm_data.GetPoseOrDie(view_J);
+//						Vec3 trans = pose_J.center() - pose_I.center();
+//						Mat3 rot = pose_J.rotation()*(pose_I.rotation().transpose());
+//						cam_cali_sum[std::make_pair(cam_i, cam_j)].push_back(geometry::Pose3(rot, trans));
+//					}
+//					else
+//						continue;
+//				}
+//			}
+//	}
+//	
+//	//再针对每一对关系求平均
+//	for (int cam_i = 0; cam_i < Group_camera_num; cam_i++)
+//		for (int cam_j = cam_i; cam_j < Group_camera_num; cam_j++)
+//		{
+//			if (cam_i == cam_j)
+//				cam_cali[std::make_pair(cam_i, cam_j)] = Pose3();
+//			else
+//			{
+//				//如果任何一个相对关系为空则返回false
+//				if (cam_cali_sum[std::make_pair(cam_i, cam_j)].empty())
+//					return false;
+//
+//				//求poses的平均值
+//				Vec3 cen_sum=Vec3(0,0,0);
+//				Vec4 quat_sum= Vec4(0.0, 0.0, 0.0, 0.0);
+//				std::cout << "cam_cali_sum[(" << cam_i << "," << cam_j << ")].size()=" << cam_cali_sum[std::make_pair(cam_i, cam_j)].size() << std::endl;
+//				for (int count = 0; count < cam_cali_sum[std::make_pair(cam_i, cam_j)].size(); count++)
+//				{
+//					cen_sum+= cam_cali_sum[std::make_pair(cam_i, cam_j)][count].center();
+//					Eigen::Matrix3d rot_i = cam_cali_sum[std::make_pair(cam_i, cam_j)][count].rotation();
+//					Eigen::Quaterniond quat(rot_i);
+//					quat_sum+= Vec4(quat.x(), quat.y(), quat.z(), quat.w());
+//				}
+//				Vec3 relative_t_average = cen_sum / cam_cali_sum[std::make_pair(cam_i, cam_j)].size();
+//				Vec4 relative_q_average = quat_sum / cam_cali_sum[std::make_pair(cam_i, cam_j)].size();
+//				Eigen::Quaterniond quat_average(relative_q_average);
+//				Mat3 relative_r_average = quat_average.toRotationMatrix();
+//				cam_cali[std::make_pair(cam_i, cam_j)] = Pose3(relative_r_average, relative_t_average);
+//			}
+//		}
+//	
+//	//然后遍历没有pose的view，估计它们的位姿
+//	std::cout << "Get views without poses and give them evaluated average values............" <<std::endl;
+//	for (const auto & view_it : sfm_data.views)
+//	{
+//		if (sfm_data.IsPoseAndIntrinsicDefined(view_it.second.get()))
+//			continue;
+//		int cam_id = 0;
+//		int cam_station = 0;
+//		std::vector<std::pair<int,int>> near_camid_views;
+//		if (b_views_grouped)
+//		{
+//			cam_id = (int)view_it.first%Group_camera_num;
+//			cam_station = (int)view_it.first / Group_camera_num;
+//			for (int cam_i = 0; cam_i < Group_camera_num; cam_i++)
+//				near_camid_views.push_back(std::make_pair(cam_i, cam_station*Group_camera_num + cam_i));
+//		}
+//		else
+//		{
+//			cam_id = view_it.first / stations;
+//			cam_station = view_it.first%stations; 
+//			for (int cam_i = 0; cam_i < Group_camera_num; cam_i++)
+//				near_camid_views.push_back(std::make_pair(cam_i, cam_i*stations + cam_station));
+//		}
+//		std::cout << "Cam_id to evaluating:" << cam_id << " and near_camid_views.size()=" << near_camid_views.size() << std::endl;
+//		std::vector<Pose3> evaluated_poses;
+//		
+//		for (int i=0;i<near_camid_views.size();i++)
+//		{
+//			View* v = sfm_data.views.at(near_camid_views[i].second).get();
+//			if (!sfm_data.IsPoseAndIntrinsicDefined(v))
+//			{
+//				std::cout << "near views :" << v->id_view << " also doesn't have a difined pose!!" << std::endl;
+//				continue;
+//			}
+//			
+//			if (near_camid_views[i].first <= cam_id)
+//			{
+//				Pose3 cam_i_pose = sfm_data.GetPoseOrDie(v);
+//				std::cout << "pose_id:" << v->id_pose << ",and pose.center is" << cam_i_pose.center()[0] << " " << cam_i_pose.center()[1] << " " << cam_i_pose.center()[2] << endl;
+//				Pose3 relative_pose = cam_cali[std::make_pair(near_camid_views[i].first, cam_id)];
+//				Pose3 cam_id_pose = Pose3(relative_pose.rotation()*cam_i_pose.rotation(), cam_i_pose.center() + relative_pose.center());
+//				evaluated_poses.push_back(cam_id_pose);
+//			}
+//			else
+//			{
+//				Pose3 cam_i_pose = sfm_data.GetPoseOrDie(v);
+//				std::cout << "pose_id:" << v->id_pose << ",and pose.center is" << cam_i_pose.center()[0] << " " << cam_i_pose.center()[1] << " " << cam_i_pose.center()[2] << endl;
+//				Pose3 relative_pose = cam_cali[std::make_pair(cam_id, near_camid_views[i].first)];
+//				Pose3 cam_id_pose = Pose3((relative_pose.rotation().transpose())*cam_i_pose.rotation(), cam_i_pose.center() - relative_pose.center());
+//				evaluated_poses.push_back(cam_id_pose);
+//			}
+//		}
+//		if (evaluated_poses.size() < 1)
+//			return false;
+//		//取平均值
+//		//求poses的平均值
+//		Vec3 pcen_sum = Vec3(0, 0, 0);
+//		Vec4 pquat_sum = Vec4(0.0, 0.0, 0.0, 0.0);
+//		for (int i = 0; i <evaluated_poses.size() ; i++)
+//		{
+//			pcen_sum += evaluated_poses[i].center();
+//			Eigen::Matrix3d prot_i = evaluated_poses[i].rotation();
+//			Eigen::Quaterniond pquat(prot_i);
+//			pquat_sum += Vec4(pquat.x(), pquat.y(), pquat.z(), pquat.w());
+//		}
+//		Vec3 prelative_t_average = pcen_sum / evaluated_poses.size();
+//		Vec4 prelative_q_average = pquat_sum / evaluated_poses.size();
+//		Eigen::Quaterniond pquat_average(prelative_q_average);
+//		Mat3 prelative_r_average = pquat_average.toRotationMatrix();
+//		sfm_data.poses[view_it.second->id_pose]= Pose3(prelative_r_average, prelative_t_average);
+//		std::cout << "Evaluated pose_id:" << view_it.second->id_pose << ",and the pose.center() is" << prelative_t_average << endl;
+//	}
+//	return sfm_data.views.size()==sfm_data.poses.size();
+//}
+
+//int CSFM::localization()
+//{
+//	std::ofstream out(recordfile, ios::ate);
+//	// Load input SfM_Data scene
+//	SfM_Data sfm_data;
+//	if (!Load(sfm_data, sOutputDir+"/sfm_data.bin", ESfM_Data(ALL))) {
+//		std::cerr << std::endl
+//			<< "The input SfM_Data file \"" << sSfM_Data_Filename << "\" cannot be read." << std::endl;
+//		return EXIT_FAILURE;
+//	}
+//	out << ";Load Sfm_data #views:" << sfm_data.views.size() << ",#poses:" << sfm_data.poses.size() << std::endl;
+//	out << ";Result for " << sQueryDir << std::endl;
+//	out << ";folder,x_coordinates,y_coordinates,z_coordinates" << std::endl;
+//
+//	if (sMatchesOutDir.empty())
+//	{
+//		sMatchesOutDir = sLocOutDir;
+//	}
+//
+//	if (sfm_data.GetPoses().empty() || sfm_data.GetLandmarks().empty())
+//	{
+//		std::cerr << std::endl
+//			<< "The input SfM_Data file have not 3D content to match with." << std::endl;
+//		return EXIT_FAILURE;
+//	}
+//
+//	// ---------------
+//	// Initialization
+//	// ---------------
+//
+//	// Init the regions_type from the image describer file (used for image regions extraction)
+//	using namespace openMVG::features;
+//	const std::string sImage_describer = stlplus::create_filespec(sOutputDir, "image_describer", "json");
+//	std::unique_ptr<Regions> regions_type = Init_region_type_from_file(sImage_describer);
+//	if (!regions_type)
+//	{
+//		std::cerr << "Invalid: "
+//			<< sImage_describer << " regions type file." << std::endl;
+//		return EXIT_FAILURE;
+//	}
+//
+//	// Init the feature extractor that have been used for the reconstruction
+//	std::unique_ptr<Image_describer> image_describer;
+//	if (stlplus::is_file(sImage_describer))
+//	{
+//		// Dynamically load the image_describer from the file (will restore old used settings)
+//		std::ifstream stream(sImage_describer.c_str());
+//		if (!stream.is_open())
+//			return EXIT_FAILURE;
+//
+//		try
+//		{
+//			cereal::JSONInputArchive archive(stream);
+//			archive(cereal::make_nvp("image_describer", image_describer));
+//		}
+//		catch (const cereal::Exception & e)
+//		{
+//			std::cerr << e.what() << std::endl
+//				<< "Cannot dynamically allocate the Image_describer interface." << std::endl;
+//			return EXIT_FAILURE;
+//		}
+//	}
+//	else
+//	{
+//		std::cerr << "Expected file image_describer.json cannot be opened." << std::endl;
+//		return EXIT_FAILURE;
+//	}
+//
+//	// Show the progress on the command line:
+//	C_Progress_display progress;
+//
+//	// Load the SfM_Data region's views
+//	std::shared_ptr<Regions_Provider> regions_provider = std::make_shared<Regions_Provider>();
+//	if (!regions_provider->load(sfm_data, sOutputDir, regions_type, &progress)) {
+//		std::cerr << std::endl << "Invalid regions." << std::endl;
+//		return EXIT_FAILURE;
+//	}
+//
+//	if (!stlplus::folder_exists(sQueryDir) && !stlplus::file_exists(sQueryDir))
+//	{
+//		std::cerr << "\nThe query directory/file does not exist : " << std::endl;
+//		std::cerr << sQueryDir << std::endl;
+//		return EXIT_FAILURE;
+//	}
+//
+//	if (sLocOutDir.empty()) {
+//		std::cerr << "\nPlease provide a valid directory for the option [-o|--out_dir]." << std::endl;
+//		return EXIT_FAILURE;
+//	}
+//
+//	if (!stlplus::folder_exists(sLocOutDir))
+//		stlplus::folder_create(sLocOutDir);
+//
+//	if (bUseSingleIntrinsics && sfm_data.GetIntrinsics().size() != 1)
+//	{
+//		std::cout << "More than one intrinsics to compare to in input scene "
+//			<< " => Consider intrinsics as unkown." << std::endl;
+//	}
+//
+//	//-- Localization
+//	// - init the retrieval database
+//	// - Go along the sfm_data view
+//	// - extract the regions of the view
+//	// - try to locate the images
+//	// - add the images to the sfm_data scene
+//
+//	std::vector<Vec3> vec_found_poses;
+//
+//	sfm::SfM_Localization_Single_3DTrackObservation_Database localizer;
+//	if (!localizer.Init(sfm_data, *regions_provider.get()))
+//	{
+//		std::cerr << "Cannot initialize the SfM localizer" << std::endl;
+//	}
+//	// Since we have copied interesting data, release some memory
+//	regions_provider.reset();
+//
+//	// list images from sfm_data in a vector
+//	std::vector<std::string> vec_image_original(sfm_data.GetViews().size());
+//	int n(-1);
+//	std::generate(vec_image_original.begin(),
+//		vec_image_original.end(),
+//		[&n, &sfm_data]
+//	{
+//		n++;
+//		return stlplus::filename_part(sfm_data.views.at(n)->s_Img_path);
+//	});
+//
+//	// list images in query directory
+//	std::vector<std::string> vec_image;
+//
+//	if (stlplus::is_file(sQueryDir))
+//	{
+//		vec_image.emplace_back(stlplus::filename_part(sQueryDir)); // single file
+//		sQueryDir = stlplus::folder_part(sQueryDir);
+//	}
+//	else vec_image = stlplus::folder_files(sQueryDir); // multiple files
+//
+//	std::sort(vec_image.begin(), vec_image.end());
+//
+//	// find difference between two list of images
+//	std::vector<std::string> vec_image_new;
+//	std::set_difference(vec_image.cbegin(), vec_image.cend(),
+//		vec_image_original.cbegin(), vec_image_original.cend(),
+//		std::back_inserter(vec_image_new));
+//
+//	// find common root directory between images in vec_image_original and vec_images_new
+//	const std::string common_root_dir = FindCommonRootDir(sfm_data.s_root_path, sQueryDir);
+//
+//	// check if sfm_data's root dir differs from the common root dir.
+//	if (sfm_data.s_root_path != common_root_dir)
+//	{
+//		// in that case we have to change all the image paths from the original
+//		// reconstruction
+//		for (auto & view : sfm_data.GetViews())
+//		{
+//			view.second->s_Img_path = stlplus::create_filespec(stlplus::folder_to_relative_path(common_root_dir, sfm_data.s_root_path),
+//				view.second->s_Img_path);
+//		}
+//		// change root path to common root path
+//		sfm_data.s_root_path = common_root_dir;
+//	}
+//
+//	// references
+//	Views & views = sfm_data.views;
+//	Poses & poses = sfm_data.poses;
+//	Intrinsics & intrinsics = sfm_data.intrinsics;
+//
+//	int total_num_images = 0;
+//
+//#ifdef OPENMVG_USE_OPENMP
+//	const unsigned int nb_max_thread = (iNumThreads == 0) ? 0 : omp_get_max_threads();
+//	omp_set_num_threads(nb_max_thread);
+//#pragma omp parallel for schedule(dynamic)
+//#endif
+//	for (int i = 0; i < static_cast<int>(vec_image_new.size()); ++i)
+//	{
+//		std::vector<std::string>::const_iterator iter_image = vec_image_new.begin();
+//		std::advance(iter_image, i);
+//
+//
+//		// Test if the image format is supported:
+//		if (openMVG::image::GetFormat((*iter_image).c_str()) == openMVG::image::Unknown)
+//		{
+//			std::cerr << *iter_image << " : unknown image file format." << std::endl;
+//			continue;
+//		}
+//
+//		std::cout << "SfM::localization => try with image: " << *iter_image << std::endl;
+//		std::unique_ptr<Regions> query_regions(regions_type->EmptyClone());
+//		image::Image<unsigned char> imageGray;
+//		{
+//			const std::string sView_filename = stlplus::create_filespec(sQueryDir, *iter_image);
+//			// Try to open image
+//			if (!image::ReadImage(sView_filename.c_str(), &imageGray))
+//			{
+//				std::cerr << "Cannot open the input provided image : " << *iter_image << std::endl;
+//				continue;
+//			}
+//
+//			const std::string
+//				sFeat = stlplus::create_filespec(sMatchesOutDir, stlplus::basename_part(sView_filename.c_str()), "feat"),
+//				sDesc = stlplus::create_filespec(sMatchesOutDir, stlplus::basename_part(sView_filename.c_str()), "desc");
+//
+//			// Compute features and descriptors and save them if they don't exist yet
+//			if (!stlplus::file_exists(sFeat) || !stlplus::file_exists(sDesc))
+//			{
+//				image_describer->Describe(imageGray, query_regions);
+//				image_describer->Save(query_regions.get(), sFeat, sDesc);
+//				std::cout << "#regions detected in query image: " << query_regions->RegionCount() << std::endl;
+//			}
+//			else // load already existing regions
+//			{
+//				query_regions->Load(sFeat, sDesc);
+//			}
+//		}
+//
+//		std::shared_ptr<cameras::IntrinsicBase> optional_intrinsic;
+//		if (bUseSingleIntrinsics)
+//		{
+//			if (sfm_data.GetIntrinsics().size() != 1)
+//			{
+//				std::cerr << "You choose the single intrinsic mode but the sfm_data scene,"
+//					<< " have too few or too much intrinsics."
+//					<< std::endl;
+//				continue;
+//			}
+//			optional_intrinsic = sfm_data.GetIntrinsics().at(0);
+//			if (imageGray.Width() != optional_intrinsic->w() || optional_intrinsic->h() != imageGray.Height())
+//			{
+//				std::cout << "The provided image does not have the same size as the camera model you want to use." << std::endl;
+//				continue;
+//			}
+//		}
+//		if (optional_intrinsic)
+//		{
+//			std::cout << "- use known intrinsics." << std::endl;
+//		}
+//		else
+//		{
+//			std::cout << "- use Unknown intrinsics for the resection. A new camera (intrinsic) will be created." << std::endl;
+//
+//			// Since the spherical image is only defined by its image size we can initialize its camera model.
+//			// This way the resection will be performed with valid bearing vector
+//			if (openMVG::cameras::EINTRINSIC(i_User_camera_model) == cameras::CAMERA_SPHERICAL)
+//			{
+//				optional_intrinsic = std::make_shared<cameras::Intrinsic_Spherical>(imageGray.Width(), imageGray.Height());
+//			}
+//		}
+//
+//		geometry::Pose3 pose;
+//		sfm::Image_Localizer_Match_Data matching_data;
+//		matching_data.error_max = dMaxResidualError;
+//
+//		bool bSuccessfulLocalization = false;
+//
+//		// Try to localize the image in the database thanks to its regions
+//		if (!localizer.Localize(
+//			optional_intrinsic ? resection::SolverType::P3P_KE_CVPR17 : resection::SolverType::DLT_6POINTS,
+//			{ imageGray.Width(), imageGray.Height() },
+//			optional_intrinsic.get(),
+//			*(query_regions.get()),
+//			pose,
+//			&matching_data))
+//		{
+//			std::cerr << "Cannot locate the image " << *iter_image << std::endl;
+//			bSuccessfulLocalization = false;
+//		}
+//		else
+//		{
+//			const bool b_new_intrinsic = (optional_intrinsic == nullptr);
+//			// A valid pose has been found (try to refine it):
+//			// If not intrinsic as input:
+//			// init a new one from the projection matrix decomposition
+//			// Else use the existing one and consider as static.
+//			if (b_new_intrinsic)
+//			{
+//				// setup a default camera model from the found projection matrix
+//				Mat3 K, R;
+//				Vec3 t;
+//				KRt_From_P(matching_data.projection_matrix, &K, &R, &t);
+//
+//				const double focal = (K(0, 0) + K(1, 1)) / 2.0;
+//				const Vec2 principal_point(K(0, 2), K(1, 2));
+//
+//				switch (openMVG::cameras::EINTRINSIC(i_User_camera_model))
+//				{
+//				case cameras::PINHOLE_CAMERA:
+//					optional_intrinsic = std::make_shared<cameras::Pinhole_Intrinsic>(imageGray.Width(), imageGray.Height(), focal, principal_point(0), principal_point(1));
+//					break;
+//				case cameras::PINHOLE_CAMERA_RADIAL1:
+//					optional_intrinsic = std::make_shared<cameras::Pinhole_Intrinsic_Radial_K1>(imageGray.Width(), imageGray.Height(), focal, principal_point(0), principal_point(1));
+//					break;
+//				case cameras::PINHOLE_CAMERA_RADIAL3:
+//					optional_intrinsic = std::make_shared<cameras::Pinhole_Intrinsic_Radial_K3>(imageGray.Width(), imageGray.Height(), focal, principal_point(0), principal_point(1));
+//					break;
+//				case cameras::PINHOLE_CAMERA_BROWN:
+//					optional_intrinsic = std::make_shared<cameras::Pinhole_Intrinsic_Brown_T2>(imageGray.Width(), imageGray.Height(), focal, principal_point(0), principal_point(1));
+//					break;
+//				case cameras::PINHOLE_CAMERA_FISHEYE:
+//					optional_intrinsic = std::make_shared<cameras::Pinhole_Intrinsic_Fisheye>(imageGray.Width(), imageGray.Height(), focal, principal_point(0), principal_point(1));
+//					break;
+//				case cameras::CAMERA_SPHERICAL:
+//					std::cerr << "The spherical camera cannot be created there. Resection of a spherical camera must be done with an existing camera model." << std::endl;
+//					break;
+//				default:
+//					std::cerr << "Error: unknown camera model: " << static_cast<int>(i_User_camera_model) << std::endl;
+//				}
+//			}
+//			if (optional_intrinsic && sfm::SfM_Localizer::RefinePose(
+//				optional_intrinsic.get(),
+//				pose, matching_data,
+//				true, b_new_intrinsic))
+//			{
+//				bSuccessfulLocalization = true;
+//			}
+//			else
+//			{
+//				std::cerr << "Refining pose for the image " << *iter_image << " failed." << std::endl;
+//			}
+//
+//		}
+//#ifdef OPENMVG_USE_OPENMP
+//#pragma omp critical
+//#endif
+//		{
+//			total_num_images++;
+//
+//			View v(*iter_image, views.size(), views.size(), views.size(), imageGray.Width(), imageGray.Height());
+//			if (bSuccessfulLocalization)
+//			{
+//				vec_found_poses.push_back(pose.center());
+//				std::cout << v.s_Img_path << "," << pose.center()[0] << "," << pose.center()[1] << "," << pose.center()[2] << std::endl;
+//				out<< stlplus::filename_part(v.s_Img_path)<<"," << pose.center()[0] << "," << pose.center()[1] << "," << pose.center()[2] << std::endl;
+//				// Add the computed intrinsic to the sfm_container
+//				if (!bUseSingleIntrinsics)
+//					intrinsics[v.id_intrinsic] = optional_intrinsic;
+//				else // Make the view using the existing intrinsic id
+//					v.id_intrinsic = sfm_data.GetViews().begin()->second->id_intrinsic;
+//				// Add the computed pose to the sfm_container
+//				poses[v.id_pose] = pose;
+//
+//			}
+//			else
+//			{
+//				v.id_intrinsic = UndefinedIndexT;
+//				v.id_pose = UndefinedIndexT;
+//			}
+//			// Add the view to the sfm_container
+//			views[v.id_view] = std::make_shared<View>(v);
+//		}
+//	}
+//	
+//	GroupSharedIntrinsics(sfm_data);
+//	std::cout << " Total poses found : " << vec_found_poses.size() << "/" << total_num_images << endl;
+//	out << ";Total poses found :" << vec_found_poses.size() << "/" << total_num_images << endl;
+//	out.close();
+//	return EXIT_SUCCESS;
+//}
 
 int CSFM::groupSfM()
 {
-	if (!Load(sfm_data, sSfM_Data_Filename, ESfM_Data(ALL))) 
+	//sfm_init_MCImageListing();
+	//computeMCFeatures();
+	//computeMCMatches();
+	//globalMCSfM();
+	//incrementalMCSfM2();
+	Evaluate_InitialPoses();
+	PairWiseMatches map_GeometricMatches;
+	if (!Load(map_GeometricMatches, sOutputDir + "/matches.e.bin"))
 	{
-		std::cout << std::endl
-			<< "The input SfM_Data file \"" << sSfM_Data_Filename << "\" cannot be read." << std::endl;
+		std::cout << "Cannot load input matches file";
 		return EXIT_FAILURE;
 	}
-	
-	if (b_use_pose_priors&&!sPosFile.empty())
-	{
-		//当pose数目很多的时候,每次重复打开同一文件会访问失败
-		//解决办法，把pos文件的pose加载到内存用map搜索
-		std::map<std::string, openMVG::geometry::Pose3>  ps_poses;
-		if (LoadPosefromPSfile(sPosFile, ps_poses))
-		{
-			std::cout <<"Loaded poses from pos file:"<<ps_poses.size() << std::endl;
-			for (const auto & view : sfm_data.views)
-			{
-				string filename = stlplus::filename_part(view.second->s_Img_path);
-				//因为PS文件名没有后缀，所以去掉后缀
-				filename = filename.substr(20, 12);
-				if(ps_poses.count(filename)==0)
-					continue;
-				geometry::Pose3 pose = ps_poses[filename];
-				sfm_data.poses[view.second->id_pose] = pose;
-			}
-		}
-		else
-		{
-			std::cout << std::endl
-				<< "The input sPosFile file \"" << sPosFile << "\" cannot be loaded." << std::endl;
-			return EXIT_FAILURE;
-		}
-		//释放内存
-		ps_poses.clear();
-	}
-	
-	std::cout
-		<< "Loaded a sfm_data scene with:\n"
-		<< " #views: " << sfm_data.GetViews().size() << "\n"
-		<< " #poses: " << sfm_data.GetPoses().size() << "\n"
-		<< " #intrinsics: " << sfm_data.GetIntrinsics().size() << "\n"
-		<< " #tracks: " << sfm_data.GetLandmarks().size()
+	std::cout << "\t GeometricMatches RESULTS LOADED;"
+		<< " #pair: " << map_GeometricMatches.size() << std::endl;
+	//-- export Adjacency matrix
+	std::cout << "\n Export Adjacency Matrix of the pairwise's geometric matches"
 		<< std::endl;
-
-	int station_num = sfm_data.views.size() / Group_camera_num;
-	
-	if (!Evaluate_InitialPoses(station_num))
-	{
-		std::cout << std::endl
-			<< "Unable to get enough poses for initializing!!!!!" << std::endl;
-		return EXIT_FAILURE;
-	}
-	
-	//用PS结果串点
-	/*
-	openMVG::sfm::Save(sfm_data,
-	stlplus::create_filespec(sOutputDir, "cloud_and_poses_ps_initial", ".ply"),
-	ESfM_Data(ALL));
-
-	for (auto & landmark_it:sfm_data.structure)
-	{
-		Observations &obs = landmark_it.second.obs;
-		std::vector<Vec3> bearing;
-		std::vector<Mat34> poses;
-		bearing.reserve(obs.size());
-		poses.reserve(obs.size());
-		for (const auto& obs_it : obs)
-		{
-			const View * view = sfm_data.views.at(obs_it.first).get();
-			if (!sfm_data.IsPoseAndIntrinsicDefined(view))
-				continue;
-			const IntrinsicBase * cam = sfm_data.GetIntrinsics().at(view->id_intrinsic).get();
-			const Pose3 pose = sfm_data.GetPoseOrDie(view);
-			bearing.emplace_back((*cam)(cam->get_ud_pixel(obs_it.second.x)));
-			poses.emplace_back(pose.asMatrix());
-		}
-		if (bearing.size() >= 2)
-		{
-			const Eigen::Map<const Mat3X> bearing_matrix(bearing[0].data(), 3, bearing.size());
-			Vec4 Xhomogeneous;
-			
-			//TriangulateNViewAlgebraic
-			openMVG::TriangulateNView
-			(
-				bearing_matrix,
-				poses, // Ps are projective cameras.
-				&Xhomogeneous);
-			landmark_it.second.X = Xhomogeneous.hnormalized();
-		}
-	}
-	*/
-
-	//三角化
-	
-	using namespace openMVG::features;
-	const std::string sImage_describer = stlplus::create_filespec(sOutputDir, "image_describer", "json");
-	std::unique_ptr<Regions> regions_type = Init_region_type_from_file(sImage_describer);
-	if (!regions_type)
-	{
-		std::cerr << "Invalid: "
-			<< sImage_describer << " regions type file." << std::endl;
-		return EXIT_FAILURE;
-	}
-
-	// Prepare the Regions provider
-	std::shared_ptr<Regions_Provider> regions_provider;
-	if (ui_max_cache_size == 0)
-	{
-		// Default regions provider (load & store all regions in memory)
-		regions_provider = std::make_shared<Regions_Provider>();
-	}
-	else
-	{
-		// Cached regions provider (load & store regions on demand)
-		regions_provider = std::make_shared<Regions_Provider_Cache>(ui_max_cache_size);
-	}
-
-	// Show the progress on the command line:
-	C_Progress_display progress;
-
-	if (!regions_provider->load(sfm_data, sOutputDir, regions_type, &progress)) {
-		std::cerr << std::endl
-			<< "Invalid regions." << std::endl;
-		return EXIT_FAILURE;
-	}
-	
-	//从已有的match文件匹配
-	
-	std::cout
-		<< "\n======================================\n"
-		<< "Robust triangulation of the match file\n"
-		<< "======================================" << std::endl;
-	PairWiseMatches matches;
-	if (!Load(matches, sOutputDir+"/matches.e.bin"))
-	{
-		std::cerr << "Unable to read the matches file." << std::endl;
-		return EXIT_FAILURE;
-	}
-	// Compute the tracks from the pairwise estimation
-	// Compute tracks from matches
-	const int min_track_length =2;
-	openMVG::tracks::STLMAPTracks tracks;
-	{
-		// List of features matches for each couple of images
-		std::cout << "\n" << "Building tracks..." << std::endl;
-		tracks::TracksBuilder tracks_builder;
-		tracks_builder.Build(matches);
-		std::cout << "Filtering tracks..." << std::endl;
-		tracks_builder.Filter(min_track_length);
-		//-- Build tracks with STL compliant type :
-		tracks_builder.ExportToSTL(tracks);
-
-		// Display some statistics about the computed tracks
-		{
-			std::ostringstream track_stream;
-			//-- Display stats :
-			//    - number of images
-			//    - number of tracks
-			std::set<uint32_t> images_id;
-			tracks::TracksUtilsMap::ImageIdInTracks(tracks, images_id);
-			track_stream
-				<< "------------------" << "\n"
-				<< "-- Tracks Stats --" << "\n"
-				<< " Tracks number: " << tracks_builder.NbTracks() << "\n"
-				<< " Images Id: " << "\n";
-			std::copy(images_id.begin(), images_id.end(),
-				std::ostream_iterator<uint32_t>(track_stream, ", "));
-			track_stream << "\n------------------" << "\n";
-
-			std::map<uint32_t, uint32_t> track_length_histogram;
-			tracks::TracksUtilsMap::TracksLength(tracks, track_length_histogram);
-			track_stream << "TrackLength, Count" << "\n";
-			for (const auto & it : track_length_histogram) {
-				track_stream << "\t" << it.first << "\t" << it.second << "\n";
-			}
-			track_stream << "\n";
-			std::cout << track_stream.str();
-		}
-	}
-
-	std::cout
-		<< "====================================\n"
-		<< "Robust triangulation of the tracks\n"
-		<< " - tracks computed from a match file\n"
-		<< "====================================" << std::endl;
-
-	// Fill sfm_data with the computed tracks (no 3D yet)
-	Landmarks & structure = sfm_data.structure;
-	IndexT idx(0);
-	for (const auto & tracks_it : tracks)
-	{
-		structure[idx] = {};
-		Observations & obs = structure.at(idx).obs;
-		for (const auto & track_it : tracks_it.second)
-		{
-			const auto imaIndex = track_it.first;
-			const auto featIndex = track_it.second;
-			const Vec2 & pt = regions_provider->get(imaIndex)->GetRegionPosition(featIndex);
-			obs[imaIndex] = { pt, featIndex };
-		}
-		++idx;
-	}
-
-	// Compute 3D position of the landmark of the structure by robust triangulation of the observations
-	{
-		const double max_reprojection_error = 4.0; // pixels reprojection error
-		bool console_verbose = true;
-		SfM_Data_Structure_Computation_Robust structure_estimator(
-			max_reprojection_error,
-			min_track_length,
-			min_track_length,
-			console_verbose);
-		structure_estimator.triangulate(sfm_data);
-	}
-
-	//用pose辅助匹配
-	/*std::cout
-		<< "=============================================================\n"
-		<< "Robust triangulation of the tracks\n"
-		<< " - Triangulation of guided epipolar geometry matches\n"
-		<< "============================================================="
-		<< std::endl;
-	//--
-	//- Pair selection method:
-	//  - geometry guided -> camera frustum intersection,
-	//  - putative matches guided (photometric matches)
-	//     (keep pairs that have valid Intrinsic & Pose ids).
-	//--
-	Pair_Set pairs;
-	//no provided pair, use camera frustum intersection
-	pairs = BuildPairsFromFrustumsIntersections(sfm_data);
-	//------------------------------------------
-	// Compute Structure from known camera poses
-	//------------------------------------------
-	openMVG::system::Timer timer;
-
-	SfM_Data_Structure_Estimation_From_Known_Poses structure_estimator(4.0);
-	structure_estimator.run(sfm_data, pairs, regions_provider);
-	std::cout << "\nStructure estimation took (s): " << timer.elapsed() << "." << std::endl;
-	*/
-
-	/*
-	openMVG::sfm::RemoveOutliers_AngleError(sfm_data, 2.0);
-	std::cout
-		<< "\n#landmark found: " << sfm_data.GetLandmarks().size() << std::endl;
-
-	//保存未优化的sfm_data
-	openMVG::sfm::Save(sfm_data,
-		stlplus::create_filespec(sOutputDir, "sfm_data_tri_multi", ".json"),
-		ESfM_Data(ALL));
-	*/
-
-	//找到主相机
-	int main_cam = 0;
-	std::vector<int> cams;
-	cams.resize(Group_camera_num, 0);
-	for (const auto landmark_it : sfm_data.structure)
-	{
-		for (const auto obs_it : landmark_it.second.obs)
-		{
-			int view_id = obs_it.first;
-
-			if (b_views_grouped)
-				cams[view_id%Group_camera_num] += 1;
-			else
-				cams[view_id / station_num] += 1;
-		}
-	}
-	main_cam = std::distance(std::begin(cams), std::max_element(std::begin(cams), std::end(cams)));
-	std::cout << "Main camera is " <<main_cam<<" with Landmarks:"<< cams[main_cam]<< std::endl;
-	
-	//计算相对位置的初值
-	std::vector<Pose3> calibrations;
-	if (!Initial_calibration(calibrations, main_cam, station_num))
-	{
-		std::cout << "Failed to initialize the calibration!!!" << std::endl;
-		return EXIT_FAILURE;
-	}
-	
-	//BA优化
-	std::cout << "Bundle adjustment..." << std::endl;
-	Bundle_Adjustment_Ceres bundle_adjustment_obj;
-
-	std::cout << "Check before BA:" << std::endl;
-	//bundle_adjustment_obj.Check_residual(sfm_data,calibrations);
-	if (!bundle_adjustment_obj.Adjust_group
-	(
-		sfm_data,
-		calibrations,
-		Optimize_Options(
-			cameras::Intrinsic_Parameter_Type::NONE,
-			Extrinsic_Parameter_Type::ADJUST_ALL,
-			Structure_Parameter_Type::ADJUST_ALL,
-			Control_Point_Parameter(20,true,b_use_multi_coordinates),
-			false, true, main_cam, b_views_grouped)
-	))
-		std::cout << "failed to finish group BA!!!" << std::endl;
-
-	/*if (!bundle_adjustment_obj.Adjust
-	(
-		sfm_data,
-		Optimize_Options(
-			cameras::Intrinsic_Parameter_Type::ADJUST_ALL,
-			Extrinsic_Parameter_Type::ADJUST_ALL,
-			Structure_Parameter_Type::ADJUST_ALL,
-			Control_Point_Parameter(50, true, b_use_multi_coordinates))
-	))
-		std::cout << "failed to finish BA!!!" << std::endl; */
-
-	const double depth_median_limit_factor = 5.2;    //5.2 * median ~= X84,
-	DepthCleaning_Double(
-		sfm_data,
-		depth_median_limit_factor);
-	openMVG::sfm::RemoveOutliers_PixelResidualError(sfm_data, 4.0, 2);
-
-	//-- Export to disk computed scene (data & visualizable results)
-	std::cout << "...Export SfM_Data to disk." << "\n"
-		<< " #views: " << sfm_data.views.size() << "\n"
-		<< " #poses: " << sfm_data.poses.size() << "\n";
-	openMVG::sfm::Save(sfm_data,
-		stlplus::create_filespec(sOutputDir, "sfm_data_out", ".json"),
-		ESfM_Data(VIEWS | EXTRINSICS | INTRINSICS | CONTROL_POINTS));
-
-	openMVG::sfm::Save(sfm_data,
-		stlplus::create_filespec(sOutputDir, "cloud_and_poses", ".ply"),
-		ESfM_Data(ALL));
-	
-}
-
-int CSFM::LoadMulltiControlPoints()
-{
-	if (!Load(sfm_data, sSfM_Data_Filename, ESfM_Data(ALL)))
-	{
-		std::cout << std::endl
-			<< "The input SfM_Data file \"" << sSfM_Data_Filename << "\" cannot be read." << std::endl;
-		return EXIT_FAILURE;
-	}
-	string file1_XYZ = "E:\\qj\\test\\outdoor_ps_project\\controlpoints_XYZ.txt";
-	string file2_obs= "E:\\qj\\test\\outdoor_ps_project\\controlpoints.txt";
-	map<string, Vec3> cp_Xs;
-	fstream f_XYZ;
-	f_XYZ.open(file1_XYZ);
-	if (!f_XYZ)
-	{
-		cout << file1_XYZ << " can not be opened!" << endl;
-		return EXIT_FAILURE;
-	}
-	string kzd = "";
-	Vec3 kzdX = Vec3(0, 0, 0);
-	while (f_XYZ >> kzd)
-	{
-		f_XYZ >> kzdX[0] >> kzdX[1] >> kzdX[2];
-		cp_Xs[kzd] = kzdX;
-	}
-	f_XYZ.close();
-	cout << "Total multi control points size:" << cp_Xs.size() << endl;
-
-	fstream f_obs;
-	f_obs.open(file2_obs);
-	if (!f_obs)
-	{
-		cout << file2_obs << " can not be opened!" << endl;
-		return EXIT_FAILURE;
-	}
-	kzd = "";
-	int image_id = 0;
-	int count = 0;
-	int station_num = sfm_data.views.size() / Group_camera_num;
-	while (f_obs >> kzd >> image_id)
-	{
-		Landmark mark;
-		mark.X = cp_Xs[kzd];
-		cout << kzd << ":" << endl;
-		while(image_id != 9999)
-		{
-			Observation ob;
-			ob.id_feat = atoi(&kzd[3]);
-			f_obs >> ob.x[0] >> ob.x[1];
-			std::cout << "ob.id_feat=" << ob.id_feat <<",ob.x=("<<ob.x[0]<<","<<ob.x[1]<<")"<< endl;
-			//PS标志点的view_id和sfm_data转换
-			int view_id = 0;
-			if (image_id % 8 == 0)
-				view_id = image_id / 8;
-			else
-				view_id = (image_id % 8 - 1)*station_num + image_id / 8;
-			mark.obs[view_id] = ob;
-			f_obs >> image_id;
-		}
-		if (mark.obs.size() > 2)
-		{
-			sfm_data.control_points[count] = mark;
-			count++;
-		}
-	}
-	std::cout << "Loaded control point size:" << sfm_data.control_points.size() << endl;
-	openMVG::sfm::Save(sfm_data,
-		stlplus::create_filespec(sOutputDir, "sfm_data_multi", ".json"),
-		ESfM_Data(ALL));
-	return 0;
-}
-
-int CSFM::localization()
-{
-	std::ofstream out(recordfile, ios::ate);
-	// Load input SfM_Data scene
-	SfM_Data sfm_data;
-	if (!Load(sfm_data, sOutputDir+"/sfm_data.bin", ESfM_Data(ALL))) {
-		std::cerr << std::endl
-			<< "The input SfM_Data file \"" << sSfM_Data_Filename << "\" cannot be read." << std::endl;
-		return EXIT_FAILURE;
-	}
-	out << ";Load Sfm_data #views:" << sfm_data.views.size() << ",#poses:" << sfm_data.poses.size() << std::endl;
-	out << ";Result for " << sQueryDir << std::endl;
-	out << ";folder,x_coordinates,y_coordinates,z_coordinates" << std::endl;
-
-	if (sMatchesOutDir.empty())
-	{
-		sMatchesOutDir = sLocOutDir;
-	}
-
-	if (sfm_data.GetPoses().empty() || sfm_data.GetLandmarks().empty())
-	{
-		std::cerr << std::endl
-			<< "The input SfM_Data file have not 3D content to match with." << std::endl;
-		return EXIT_FAILURE;
-	}
-
-	// ---------------
-	// Initialization
-	// ---------------
-
-	// Init the regions_type from the image describer file (used for image regions extraction)
-	using namespace openMVG::features;
-	const std::string sImage_describer = stlplus::create_filespec(sOutputDir, "image_describer", "json");
-	std::unique_ptr<Regions> regions_type = Init_region_type_from_file(sImage_describer);
-	if (!regions_type)
-	{
-		std::cerr << "Invalid: "
-			<< sImage_describer << " regions type file." << std::endl;
-		return EXIT_FAILURE;
-	}
-
-	// Init the feature extractor that have been used for the reconstruction
-	std::unique_ptr<Image_describer> image_describer;
-	if (stlplus::is_file(sImage_describer))
-	{
-		// Dynamically load the image_describer from the file (will restore old used settings)
-		std::ifstream stream(sImage_describer.c_str());
-		if (!stream.is_open())
-			return EXIT_FAILURE;
-
-		try
-		{
-			cereal::JSONInputArchive archive(stream);
-			archive(cereal::make_nvp("image_describer", image_describer));
-		}
-		catch (const cereal::Exception & e)
-		{
-			std::cerr << e.what() << std::endl
-				<< "Cannot dynamically allocate the Image_describer interface." << std::endl;
-			return EXIT_FAILURE;
-		}
-	}
-	else
-	{
-		std::cerr << "Expected file image_describer.json cannot be opened." << std::endl;
-		return EXIT_FAILURE;
-	}
-
-	// Show the progress on the command line:
-	C_Progress_display progress;
-
-	// Load the SfM_Data region's views
-	std::shared_ptr<Regions_Provider> regions_provider = std::make_shared<Regions_Provider>();
-	if (!regions_provider->load(sfm_data, sOutputDir, regions_type, &progress)) {
-		std::cerr << std::endl << "Invalid regions." << std::endl;
-		return EXIT_FAILURE;
-	}
-
-	if (!stlplus::folder_exists(sQueryDir) && !stlplus::file_exists(sQueryDir))
-	{
-		std::cerr << "\nThe query directory/file does not exist : " << std::endl;
-		std::cerr << sQueryDir << std::endl;
-		return EXIT_FAILURE;
-	}
-
-	if (sLocOutDir.empty()) {
-		std::cerr << "\nPlease provide a valid directory for the option [-o|--out_dir]." << std::endl;
-		return EXIT_FAILURE;
-	}
-
-	if (!stlplus::folder_exists(sLocOutDir))
-		stlplus::folder_create(sLocOutDir);
-
-	if (bUseSingleIntrinsics && sfm_data.GetIntrinsics().size() != 1)
-	{
-		std::cout << "More than one intrinsics to compare to in input scene "
-			<< " => Consider intrinsics as unkown." << std::endl;
-	}
-
-	//-- Localization
-	// - init the retrieval database
-	// - Go along the sfm_data view
-	// - extract the regions of the view
-	// - try to locate the images
-	// - add the images to the sfm_data scene
-
-	std::vector<Vec3> vec_found_poses;
-
-	sfm::SfM_Localization_Single_3DTrackObservation_Database localizer;
-	if (!localizer.Init(sfm_data, *regions_provider.get()))
-	{
-		std::cerr << "Cannot initialize the SfM localizer" << std::endl;
-	}
-	// Since we have copied interesting data, release some memory
-	regions_provider.reset();
-
-	// list images from sfm_data in a vector
-	std::vector<std::string> vec_image_original(sfm_data.GetViews().size());
-	int n(-1);
-	std::generate(vec_image_original.begin(),
-		vec_image_original.end(),
-		[&n, &sfm_data]
-	{
-		n++;
-		return stlplus::filename_part(sfm_data.views.at(n)->s_Img_path);
-	});
-
-	// list images in query directory
-	std::vector<std::string> vec_image;
-
-	if (stlplus::is_file(sQueryDir))
-	{
-		vec_image.emplace_back(stlplus::filename_part(sQueryDir)); // single file
-		sQueryDir = stlplus::folder_part(sQueryDir);
-	}
-	else vec_image = stlplus::folder_files(sQueryDir); // multiple files
-
-	std::sort(vec_image.begin(), vec_image.end());
-
-	// find difference between two list of images
-	std::vector<std::string> vec_image_new;
-	std::set_difference(vec_image.cbegin(), vec_image.cend(),
-		vec_image_original.cbegin(), vec_image_original.cend(),
-		std::back_inserter(vec_image_new));
-
-	// find common root directory between images in vec_image_original and vec_images_new
-	const std::string common_root_dir = FindCommonRootDir(sfm_data.s_root_path, sQueryDir);
-
-	// check if sfm_data's root dir differs from the common root dir.
-	if (sfm_data.s_root_path != common_root_dir)
-	{
-		// in that case we have to change all the image paths from the original
-		// reconstruction
-		for (auto & view : sfm_data.GetViews())
-		{
-			view.second->s_Img_path = stlplus::create_filespec(stlplus::folder_to_relative_path(common_root_dir, sfm_data.s_root_path),
-				view.second->s_Img_path);
-		}
-		// change root path to common root path
-		sfm_data.s_root_path = common_root_dir;
-	}
-
-	// references
-	Views & views = sfm_data.views;
-	Poses & poses = sfm_data.poses;
-	Intrinsics & intrinsics = sfm_data.intrinsics;
-
-	int total_num_images = 0;
-
-#ifdef OPENMVG_USE_OPENMP
-	const unsigned int nb_max_thread = (iNumThreads == 0) ? 0 : omp_get_max_threads();
-	omp_set_num_threads(nb_max_thread);
-#pragma omp parallel for schedule(dynamic)
-#endif
-	for (int i = 0; i < static_cast<int>(vec_image_new.size()); ++i)
-	{
-		std::vector<std::string>::const_iterator iter_image = vec_image_new.begin();
-		std::advance(iter_image, i);
-
-
-		// Test if the image format is supported:
-		if (openMVG::image::GetFormat((*iter_image).c_str()) == openMVG::image::Unknown)
-		{
-			std::cerr << *iter_image << " : unknown image file format." << std::endl;
-			continue;
-		}
-
-		std::cout << "SfM::localization => try with image: " << *iter_image << std::endl;
-		std::unique_ptr<Regions> query_regions(regions_type->EmptyClone());
-		image::Image<unsigned char> imageGray;
-		{
-			const std::string sView_filename = stlplus::create_filespec(sQueryDir, *iter_image);
-			// Try to open image
-			if (!image::ReadImage(sView_filename.c_str(), &imageGray))
-			{
-				std::cerr << "Cannot open the input provided image : " << *iter_image << std::endl;
-				continue;
-			}
-
-			const std::string
-				sFeat = stlplus::create_filespec(sMatchesOutDir, stlplus::basename_part(sView_filename.c_str()), "feat"),
-				sDesc = stlplus::create_filespec(sMatchesOutDir, stlplus::basename_part(sView_filename.c_str()), "desc");
-
-			// Compute features and descriptors and save them if they don't exist yet
-			if (!stlplus::file_exists(sFeat) || !stlplus::file_exists(sDesc))
-			{
-				image_describer->Describe(imageGray, query_regions);
-				image_describer->Save(query_regions.get(), sFeat, sDesc);
-				std::cout << "#regions detected in query image: " << query_regions->RegionCount() << std::endl;
-			}
-			else // load already existing regions
-			{
-				query_regions->Load(sFeat, sDesc);
-			}
-		}
-
-		std::shared_ptr<cameras::IntrinsicBase> optional_intrinsic;
-		if (bUseSingleIntrinsics)
-		{
-			if (sfm_data.GetIntrinsics().size() != 1)
-			{
-				std::cerr << "You choose the single intrinsic mode but the sfm_data scene,"
-					<< " have too few or too much intrinsics."
-					<< std::endl;
-				continue;
-			}
-			optional_intrinsic = sfm_data.GetIntrinsics().at(0);
-			if (imageGray.Width() != optional_intrinsic->w() || optional_intrinsic->h() != imageGray.Height())
-			{
-				std::cout << "The provided image does not have the same size as the camera model you want to use." << std::endl;
-				continue;
-			}
-		}
-		if (optional_intrinsic)
-		{
-			std::cout << "- use known intrinsics." << std::endl;
-		}
-		else
-		{
-			std::cout << "- use Unknown intrinsics for the resection. A new camera (intrinsic) will be created." << std::endl;
-
-			// Since the spherical image is only defined by its image size we can initialize its camera model.
-			// This way the resection will be performed with valid bearing vector
-			if (openMVG::cameras::EINTRINSIC(i_User_camera_model) == cameras::CAMERA_SPHERICAL)
-			{
-				optional_intrinsic = std::make_shared<cameras::Intrinsic_Spherical>(imageGray.Width(), imageGray.Height());
-			}
-		}
-
-		geometry::Pose3 pose;
-		sfm::Image_Localizer_Match_Data matching_data;
-		matching_data.error_max = dMaxResidualError;
-
-		bool bSuccessfulLocalization = false;
-
-		// Try to localize the image in the database thanks to its regions
-		if (!localizer.Localize(
-			optional_intrinsic ? resection::SolverType::P3P_KE_CVPR17 : resection::SolverType::DLT_6POINTS,
-			{ imageGray.Width(), imageGray.Height() },
-			optional_intrinsic.get(),
-			*(query_regions.get()),
-			pose,
-			&matching_data))
-		{
-			std::cerr << "Cannot locate the image " << *iter_image << std::endl;
-			bSuccessfulLocalization = false;
-		}
-		else
-		{
-			const bool b_new_intrinsic = (optional_intrinsic == nullptr);
-			// A valid pose has been found (try to refine it):
-			// If not intrinsic as input:
-			// init a new one from the projection matrix decomposition
-			// Else use the existing one and consider as static.
-			if (b_new_intrinsic)
-			{
-				// setup a default camera model from the found projection matrix
-				Mat3 K, R;
-				Vec3 t;
-				KRt_From_P(matching_data.projection_matrix, &K, &R, &t);
-
-				const double focal = (K(0, 0) + K(1, 1)) / 2.0;
-				const Vec2 principal_point(K(0, 2), K(1, 2));
-
-				switch (openMVG::cameras::EINTRINSIC(i_User_camera_model))
-				{
-				case cameras::PINHOLE_CAMERA:
-					optional_intrinsic = std::make_shared<cameras::Pinhole_Intrinsic>(imageGray.Width(), imageGray.Height(), focal, principal_point(0), principal_point(1));
-					break;
-				case cameras::PINHOLE_CAMERA_RADIAL1:
-					optional_intrinsic = std::make_shared<cameras::Pinhole_Intrinsic_Radial_K1>(imageGray.Width(), imageGray.Height(), focal, principal_point(0), principal_point(1));
-					break;
-				case cameras::PINHOLE_CAMERA_RADIAL3:
-					optional_intrinsic = std::make_shared<cameras::Pinhole_Intrinsic_Radial_K3>(imageGray.Width(), imageGray.Height(), focal, principal_point(0), principal_point(1));
-					break;
-				case cameras::PINHOLE_CAMERA_BROWN:
-					optional_intrinsic = std::make_shared<cameras::Pinhole_Intrinsic_Brown_T2>(imageGray.Width(), imageGray.Height(), focal, principal_point(0), principal_point(1));
-					break;
-				case cameras::PINHOLE_CAMERA_FISHEYE:
-					optional_intrinsic = std::make_shared<cameras::Pinhole_Intrinsic_Fisheye>(imageGray.Width(), imageGray.Height(), focal, principal_point(0), principal_point(1));
-					break;
-				case cameras::CAMERA_SPHERICAL:
-					std::cerr << "The spherical camera cannot be created there. Resection of a spherical camera must be done with an existing camera model." << std::endl;
-					break;
-				default:
-					std::cerr << "Error: unknown camera model: " << static_cast<int>(i_User_camera_model) << std::endl;
-				}
-			}
-			if (optional_intrinsic && sfm::SfM_Localizer::RefinePose(
-				optional_intrinsic.get(),
-				pose, matching_data,
-				true, b_new_intrinsic))
-			{
-				bSuccessfulLocalization = true;
-			}
-			else
-			{
-				std::cerr << "Refining pose for the image " << *iter_image << " failed." << std::endl;
-			}
-
-		}
-#ifdef OPENMVG_USE_OPENMP
-#pragma omp critical
-#endif
-		{
-			total_num_images++;
-
-			View v(*iter_image, views.size(), views.size(), views.size(), imageGray.Width(), imageGray.Height());
-			if (bSuccessfulLocalization)
-			{
-				vec_found_poses.push_back(pose.center());
-				std::cout << v.s_Img_path << "," << pose.center()[0] << "," << pose.center()[1] << "," << pose.center()[2] << std::endl;
-				out<< stlplus::filename_part(v.s_Img_path)<<"," << pose.center()[0] << "," << pose.center()[1] << "," << pose.center()[2] << std::endl;
-				// Add the computed intrinsic to the sfm_container
-				if (!bUseSingleIntrinsics)
-					intrinsics[v.id_intrinsic] = optional_intrinsic;
-				else // Make the view using the existing intrinsic id
-					v.id_intrinsic = sfm_data.GetViews().begin()->second->id_intrinsic;
-				// Add the computed pose to the sfm_container
-				poses[v.id_pose] = pose;
-
-			}
-			else
-			{
-				v.id_intrinsic = UndefinedIndexT;
-				v.id_pose = UndefinedIndexT;
-			}
-			// Add the view to the sfm_container
-			views[v.id_view] = std::make_shared<View>(v);
-		}
-	}
-	
-	GroupSharedIntrinsics(sfm_data);
-	std::cout << " Total poses found : " << vec_found_poses.size() << "/" << total_num_images << endl;
-	out << ";Total poses found :" << vec_found_poses.size() << "/" << total_num_images << endl;
-	out.close();
+	PairWiseMatchingToAdjacencyMatrixSVG_MC(sfm_data.views.size(),7,
+		map_GeometricMatches,
+		stlplus::create_filespec(sOutputDir, "GeometricAdjacencyMatrix_MC", "svg"));
 	return EXIT_SUCCESS;
 }
 
@@ -3152,36 +2085,18 @@ int main()
 {
 	//sfm_init_ImageListing
 	CSFM sfm;
-	sfm.sImageDir = "D:/1graduation/hongyelou/images/";
-	sfm.sOutputDir = "D:/1graduation/hongyelou/output_v2/";
+	sfm.sImageDir = "E:/qj/concentration/gopro_cc/undistorted_photos";
+	sfm.sOutputDir = "D:/1graduation/suidao/";
 	sfm.sSfM_Data_Filename = sfm.sOutputDir + "sfm_data.json";
-	sfm.i_User_camera_model = PINHOLE_CAMERA_FISHEYE;
+	sfm.recordfile = "D:/1graduation/suidao/record.txt";
+	sfm.i_User_camera_model = PINHOLE_CAMERA;
 	sfm.b_use_motion_priors = false;
 	sfm.Group_camera_num = 7;
-	//sfm.sKmatrix = "1754.5025070765;0;1999.15616982878;0;1754.5025070765;1504.93517804714;0;0;1";
-	//sfm.ePairmode = PAIR_FOR_GROUPCAMERAS;
-	//sfm.b_views_grouped = true;
-	//sfm.sPosFile = sfm.sOutputDir + "/all.txt";
+	sfm.sKmatrix = "1754.5025070765;1999.15616982878;1504.93517804714;1756.32891440917;1999.69337243298;1516.10350889407;1762.1039454281;1998.12787930753;1511.8461723193;1758.94141840993;1984.91635244305;1508.77780339745;1753.47218053945;1993.51101954389;1520.61457333347;1755.63373929306;2006.60312067035;1507.26947519801;1757.83574549348;1994.89306111102;1522.69675961653;";
+	sfm.ePairmode = PAIR_FOR_MULTICAMERAS;
 	sfm.b_use_motion_priors = false;
-	
-	//sfm.sfm_init_GroupImageListing();
-	//sfm.sfm_init_ImageListing();
-	//sfm.sImage_Describer_Method = "SIFT_GPU";
-	//sfm.computeFeatures();
-	//sfm.sNearestMatchingMethod = "FASTCASCADEHASHINGL2";
-	//sfm.sGeometricModel = "f";
-	//sfm.computeMatches();
-	//sfm.globalSfM();
-	//sfm.incrementalSfM();
-	//sfm.LoadMulltiControlPoints();
-	//sfm.groupSfM();
-	sfm.incrementalSfM2();
-
-	/*sfm.sQueryDir = "F:/0competition/测试数据集/"+testdata+"/thumbnail";
-	sfm.sLocOutDir = sfm.sOutputDir+"/Localization";
-	sfm.sMatchesOutDir = sfm.sLocOutDir + "/locMathes";
-	sfm.recordfile = "F:/0competition/"+testdata+".csv";
-	sfm.localization();*/
+	sfm.sImage_Describer_Method = "SIFT_GPU";
+	sfm.groupSfM();
 	return getchar();
 }
 

@@ -43,8 +43,8 @@ inline Pair_Set contiguousWithOverlap(const size_t N, const size_t overlapSize)
   return pairs;
 }
 
-//因为相机组之间的影像不具有重叠，所以同站之间的影像不进行匹配
-inline Pair_Set groupCamerasPairs(const size_t N,int group_cams_num, bool b_grouped)
+//Because cameras are nonoverlapping,we just consider intra-camera and inter-camera matches.
+inline Pair_Set MultiCamerasPairs(const size_t N,int group_cams_num)
 {
 	int station_num = (int)N / group_cams_num;
 	Pair_Set pairs;
@@ -52,16 +52,8 @@ inline Pair_Set groupCamerasPairs(const size_t N,int group_cams_num, bool b_grou
 		for (IndexT J = I + 1; J < static_cast<IndexT>(N); ++J)
 		{
 			int station_i = 0, station_j = 0;
-			if (b_grouped)
-			{
-				station_i = I / group_cams_num;
-				station_j = J /group_cams_num;
-			}
-			else
-			{
-				station_i = I % station_num;
-				station_j = J % station_num;
-			}
+			station_i = I % station_num;
+			station_j = J % station_num;
 			if (station_i!=station_j)
 				pairs.insert({ I,J });
 			else

@@ -50,7 +50,7 @@ struct Matches_Provider
         if (views.find(iter->first.first) != views.end() &&
           views.find(iter->first.second) != views.end())
         {
-          matches_saved.insert(*iter);
+			matches_saved.insert(*iter);
         }
       }
       pairWise_matches_.swap(matches_saved);

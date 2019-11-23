@@ -67,6 +67,67 @@ void PairWiseMatchingToAdjacencyMatrixSVG
   }
 }
 
+//Verified by double
+void PairWiseMatchingToAdjacencyMatrixSVG_MC
+(
+	const size_t NbImages,const size_t NbCameras,
+	const matching::PairWiseMatches & map_Matches,
+	const std::string & sOutName
+)
+{
+	size_t stationnum = NbImages / NbImages;
+	if (!map_Matches.empty())
+	{
+		const float scaleFactor = 5.0f;
+		svg::svgDrawer svgStream((NbImages + 3) * 5, (NbImages + 3) * 5);
+		// Go along all possible pair
+		for (size_t I = 0; I < NbImages; ++I) {
+			for (size_t J = 0; J < NbImages; ++J) {
+				// If the pair have matches display a blue boxes at I,J position.
+				auto iterSearch = map_Matches.find({ I,J });
+				if (iterSearch != map_Matches.end() && !iterSearch->second.empty())
+				{
+					// Display as a tooltip: (IndexI, IndexJ NbMatches)
+					std::ostringstream os;
+					os << "(" << J << "," << I << " " << iterSearch->second.size() << ")";
+					svgStream.drawSquare(J*scaleFactor, I*scaleFactor, scaleFactor / 2.0f,
+						svg::svgStyle().fill("blue").noStroke());
+				} // HINT : THINK ABOUT OPACITY [0.4 -> 1.0] TO EXPRESS MATCH COUNT
+			}
+		}
+		// Display axes with 0 -> NbImages annotation : _|
+		std::ostringstream osNbImages;
+		osNbImages << NbImages;
+		svgStream.drawText((NbImages + 1)*scaleFactor, scaleFactor, scaleFactor, "0", "black");
+		svgStream.drawText((NbImages + 1)*scaleFactor,
+			(NbImages)*scaleFactor - scaleFactor, scaleFactor, osNbImages.str(), "black");
+		svgStream.drawLine((NbImages + 1)*scaleFactor, 2 * scaleFactor,
+			(NbImages + 1)*scaleFactor, (NbImages)*scaleFactor - 2 * scaleFactor,
+			svg::svgStyle().stroke("black", 1.0));
+
+		svgStream.drawText(scaleFactor, (NbImages + 1)*scaleFactor, scaleFactor, "0", "black");
+		svgStream.drawText((NbImages)*scaleFactor - scaleFactor,
+			(NbImages + 1)*scaleFactor, scaleFactor, osNbImages.str(), "black");
+		svgStream.drawLine(2 * scaleFactor, (NbImages + 1)*scaleFactor,
+			(NbImages)*scaleFactor - 2 * scaleFactor, (NbImages + 1)*scaleFactor,
+			svg::svgStyle().stroke("black", 1.0));
+
+		//Separate the different camera
+		for (size_t l = 1; l < NbCameras-1; l++)
+		{
+			//level line
+			svgStream.drawLine(0, (l*stationnum)*scaleFactor, (NbImages)*scaleFactor, (l*stationnum)*scaleFactor,
+				svg::svgStyle().stroke("red", 1.0));
+			//vertical line
+			svgStream.drawLine( (l*stationnum)*scaleFactor,0, (l*stationnum)*scaleFactor,(NbImages)*scaleFactor,
+				svg::svgStyle().stroke("red", 1.0));
+		}
+		
+		std::ofstream svgFileStream(sOutName.c_str());
+		svgFileStream << svgStream.closeSvgFile().str();
+	}
+}
+
 } // namespace matching
 } // namespace openMVG
 

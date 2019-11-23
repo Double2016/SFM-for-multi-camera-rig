@@ -103,8 +103,7 @@ enum EPairMode
 {
 	PAIR_EXHAUSTIVE = 0,
 	PAIR_CONTIGUOUS = 1,
-	PAIR_FROM_FILE = 2,
-	PAIR_FOR_GROUPCAMERAS=3
+	PAIR_FOR_MULTICAMERAS=2
 };
 
 
@@ -113,22 +112,23 @@ class CSFM
 public:
     CSFM();
 	~CSFM();
-	//各模块共用的一些变量
+	//Global Variants
 	SfM_Data sfm_data;
 	
 	std::string sImageDir,
 		sfileDatabase = "",
 		sOutputDir = "",
 		sKmatrix;
+	std::vector<std::string> image_root_dirs;
 	std::string recordfile;
 	std::string sSfM_Data_Filename;
 	std::string sMatchFilename;
 	
 	int i_User_camera_model = PINHOLE_CAMERA_RADIAL3;
-	std::string sIntrinsic_refinement_options = "ADJUST_ALL";
+	std::string sIntrinsic_refinement_options = "NONE";
 	bool b_use_motion_priors = false;//使用gps时记得开启
 	bool b_use_pose_priors = false;//使用先验pose时开启
-	EPairMode ePairmode;
+	EPairMode ePairmode= PAIR_FOR_MULTICAMERAS;
 	//sfm_init_ImageListing	
 	std::pair<bool, Vec3> gps_info;
 	std::pair<bool, Pose3> pose_info;
@@ -136,60 +136,52 @@ public:
 	std::string sPriorWeights;	
 	bool b_Group_camera_model = true;	
 	int Group_camera_num = 1;
-	bool b_views_grouped = false;
-	bool b_use_multi_coordinates = false;
-	int i_GPS_XYZ_method = 0;
+	int main_cam = 0;
+	int station_num = 1;
 	double focal_pixels = -1.0;	
-	int sfm_init_ImageListing();
-	int sfm_init_GroupImageListing();
-	int LoadMulltiControlPoints();
-	//computeFeatures
-	
+	//Image Listing
+	//Images from different lens should be stored in different folders.
+	//In other words,there is a one-to-one correspondence between a len and a folder.
+	int sfm_init_MCImageListing();
+
+	//computeFeatures 
 	bool bUpRight = false;
 	bool bForce_f = false;
-	std::string sImage_Describer_Method = "SIFT";	
+	//Describer Methods:SIFT,SIFT_ANATOMY,AKAZE_FLOAT,AKAZE_MLDB
+	std::string sImage_Describer_Method = "SIFT_GPU";	
 	std::string sFeaturePreset = "NORMAL";
 #ifdef OPENMVG_USE_OPENMP
 	int iNumThreads = 0;
 #endif	 
-	int computeFeatures();
-
-	//pos信息导入及pos辅助匹配
-	std::string sPosFile = "";
-	std::string sPredefinedPairList = "";
-	bool enablePosAssited = false;
-	
-	//可选的调用
+	int computeMCFeatures();
 
     //computeMatches
-	std::string sGeometricModel = "f";
+	//Each len's K matrix is knowns
+	std::string sGeometricModel = "e";
 	float fDistRatio = 0.8f;
 	int iMatchingVideoMode = -1;
 	
-	std::string sNearestMatchingMethod = "AUTO";
+	std::string sNearestMatchingMethod = "FASTCASCADEHASHINGL2";
 	bool bForce_m = false;
 	bool bGuided_matching = false;
 	int imax_iteration = 2048;
 	unsigned int ui_max_cache_size = 0;
-	int computeMatches();
+	int computeMCMatches();
 
+	//Pose initialization
 	//globalSfM
-	
 	int iRotationAveragingMethod = int(ROTATION_AVERAGING_L2);
 	int iTranslationAveragingMethod = int(TRANSLATION_AVERAGING_SOFTL1);
-	
-	int globalSfM();
-	bool Initial_calibration(std::vector<Pose3>& relative_poses,int main_cam,int stations);
-	bool Evaluate_InitialPoses(int stations);
-	int groupSfM();
-
-	//incrementalSfM
-	std::pair<std::string, std::string> initialPairString;
-	int incrementalSfM();
+	int globalMCSfM();
 
 	//incrementalSfM2
 	std::string sSfMInitializer_method = "STELLAR";
-	int incrementalSfM2();
+	int incrementalMCSfM2();
+
+	//Eye-to-eye Calibration
+	bool Evaluate_InitialPoses();
+	bool Initial_calibration(std::vector<Pose3>& relative_poses, int main_cam, int stations);
+	
 
 	//localization
 	std::string sMatchesOutDir;
@@ -201,4 +193,9 @@ public:
 	bool bExportStructure = false;
 	int localization();
 
+	//Pose Refinement
+	bool RBA();
+
+	//Entrance
+	int groupSfM();
 };

@@ -114,6 +114,7 @@ bool GlobalSfMReconstructionEngine_RelativeMotions::Process() {
   //-------------------
   {
     const Pair_Set pairs = matches_provider_->getPairs();
+	std::cout << "Pairs size:" << pairs.size() << std::endl;
     const std::set<IndexT> set_remainingIds = graph::CleanGraph_KeepLargestBiEdge_Nodes<Pair_Set, IndexT>(pairs);
     if (set_remainingIds.empty())
     {
