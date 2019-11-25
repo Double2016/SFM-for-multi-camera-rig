@@ -1,4 +1,4 @@
-
+ï»¿
 #include"fatCSFM.hpp"
 
 bool checkGroupIntrinsicStringValidity(const std::string & Kmatrix, std::vector<double> & focal, std::vector<double> & ppx, std::vector<double> & ppy)
@@ -25,6 +25,54 @@ bool checkGroupIntrinsicStringValidity(const std::string & Kmatrix, std::vector<
 	return true;
 }
 
+double Generate_SfM_RMSE(const SfM_Data & sfm_data)
+{
+	IndexT residualCount = 0;
+	Hash_Map<IndexT, std::vector<double>> residuals_per_view;
+	std::map<IndexT, IndexT> track_length_occurences;
+	for (const auto & iterTracks : sfm_data.GetLandmarks())
+	{
+		const Observations & obs = iterTracks.second.obs;
+		track_length_occurences[obs.size()] += 1;
+		for (const auto & itObs : obs)
+		{
+			const View * view = sfm_data.GetViews().at(itObs.first).get();
+			const geometry::Pose3 pose = sfm_data.GetPoseOrDie(view);
+			const cameras::IntrinsicBase * intrinsic = sfm_data.GetIntrinsics().at(view->id_intrinsic).get();
+			// Use absolute values
+			const Vec2 residual = intrinsic->residual(pose(iterTracks.second.X), itObs.second.x).array().abs();
+			residuals_per_view[itObs.first].push_back(residual(0));
+			residuals_per_view[itObs.first].push_back(residual(1));
+			++residualCount;
+		}
+	}
+
+	// combine all residual values into one vector
+	{
+		IndexT residualCount = 0;
+		for (const auto & residual_per_view_it : residuals_per_view)
+		{
+			residualCount += residual_per_view_it.second.size();
+		}
+		// Concat per view residual values into one vector
+		std::vector<double> residuals(residualCount);
+		residualCount = 0;
+		for (const auto & residual_per_view_it : residuals_per_view)
+		{
+			std::copy(residual_per_view_it.second.begin(),
+				residual_per_view_it.second.end(),
+				residuals.begin() + residualCount);
+			residualCount += residual_per_view_it.second.size();
+		}
+		if (!residuals.empty())
+		{
+			// RMSE computation
+			const Eigen::Map<Eigen::RowVectorXd> residuals_mapping(&residuals[0], residuals.size());
+			const double RMSE = std::sqrt(residuals_mapping.squaredNorm() / (double)residuals.size());
+			return RMSE;
+		}
+	}
+}
 
 //int CompareCoords_2sfm_data()
 //{
@@ -319,7 +367,7 @@ int CSFM::sfm_init_MCImageListing()
 	else
 		std::cout << "Kmatrix size:" << focal.size() << std::endl;
 
-	//´æ´¢Ó°Ïñ¸ùÄ¿Â¼
+	//å­˜å‚¨å½±åƒæ ¹ç›®å½•
 	sfm_data.s_root_path = sImageDir; // Setup main image root_path
 	image_root_dirs = stlplus::folder_subdirectories(sImageDir);
 	int i_key = 0;
@@ -327,7 +375,7 @@ int CSFM::sfm_init_MCImageListing()
 	if (image_root_dirs.size() < 1)
 		return EXIT_FAILURE;
 
-	//Ó°Ïñ°´¾µÍ··Ö×é
+	//å½±åƒæŒ‰é•œå¤´åˆ†ç»„
 	for (int subdir = 0; subdir < image_root_dirs.size(); subdir++, i_key++)
 	{
 		std::vector<std::string> vec_image = stlplus::folder_files(sfm_data.s_root_path + "/" + image_root_dirs[subdir]);
@@ -592,7 +640,7 @@ int CSFM::computeMCFeatures()
 		}
 		else {
 			omp_set_num_threads(nb_max_thread);
-			std::cout << "Ê¹ÓÃ×î´óÏß³Ì£¬µ±Ç°Ïß³ÌÊıÄ¿Îª= " << nb_max_thread << std::endl;
+			std::cout << "ä½¿ç”¨æœ€å¤§çº¿ç¨‹ï¼Œå½“å‰çº¿ç¨‹æ•°ç›®ä¸º= " << nb_max_thread << std::endl;
 		}
 		
 #pragma omp parallel for schedule(dynamic) if (iNumThreads > 0) private(imageGray)
@@ -977,7 +1025,7 @@ int CSFM::computeMCMatches()
 	//    - AContrario Estimation of the desired geometric model
 	//    - Use an upper bound for the a contrario estimated threshold
 	//---------------------------------------
-	//Èç¹ûÒÑÓĞgeometric filterºóµÄÎÄ¼ş£¬²»ÔÙÖØĞÂ¼ÆËã
+	//å¦‚æœå·²æœ‰geometric filteråçš„æ–‡ä»¶ï¼Œä¸å†é‡æ–°è®¡ç®—
 	PairWiseMatches map_GeometricMatches;
 
 	if (!bForce_m
@@ -1213,12 +1261,7 @@ int CSFM::globalMCSfM()
 
 		if (sfmEngine.Process())
 		{
-			std::cout << std::endl << " Total Ac-Global-Sfm for this cam group took (s): " << timer.elapsed() << std::endl;
-
-			std::cout << "...Generating SfM_Report.html" << std::endl;
-			Generate_SfM_Report(sfmEngine.Get_SfM_Data(),
-				stlplus::create_filespec(sOutputDir, "SfMReconstruction_Report_for_cam"+to_string(cam)+".html"));
-
+			MCRMSEs[cam] = Generate_SfM_RMSE(sfm_data_single);
 			//-- Export to disk computed scene (data & visualizable results)
 			std::cout << "...Export SfM_Data to disk." << std::endl;
 			Save(sfmEngine.Get_SfM_Data(),
@@ -1426,6 +1469,17 @@ int CSFM::incrementalMCSfM2()
 	return EXIT_SUCCESS;
 }
 
+//many pairs of observations {(A1,B1),(A2,B2),â‹¯,(Ak,Bk)}ï¼Œfinding the soluion of the eqution AX=XB can be turned into minimization problem
+bool CSFM::Solve_AX_XB(vector<pair<int, int>>& pose_pairs, Pose3& transformation)
+{
+	if (pose_pairs.size() < 2)
+	{
+		std::cout << "Not enough pose pairs!!!!!" << std::endl;
+		return false;
+	}
+	return true;
+}
+
 bool CSFM::Evaluate_InitialPoses()
 {
 	string sfm_Data_Filename = stlplus::create_filespec(sOutputDir, "sfm_data_intial", ".bin");
@@ -1442,14 +1496,16 @@ bool CSFM::Evaluate_InitialPoses()
 		<< " #tracks: " << sfm_data.structure.size() << "\n"
 		<< std::endl;
 
-	//Station matrix information
-	std::vector<std::vector<bool>> station_info ;
-	vector<int> all_valid_station;
+	//Count number of poses for each camera
+	vector<int> posesnum_each_camera;//Poses' num of each camera's sfm_data
+	posesnum_each_camera.resize(Group_camera_num, 0);
+
+	//Build the station information matrix which can be used to judge if the poses for each camera are valid in the same station.
+	std::vector<std::vector<bool>> station_info ;//Station matrix information
 	for (int i = 0; i < station_num; i++)
 	{
 		std::vector<bool> valid_cams;
 		valid_cams.resize(Group_camera_num, 0);
-		int valid_cam_nums = 0;
 		for (int cam = 0; cam < Group_camera_num; cam++)
 		{
 			int view_id = cam*station_num + i;
@@ -1457,28 +1513,54 @@ bool CSFM::Evaluate_InitialPoses()
 			if (sfm_data.IsPoseAndIntrinsicDefined(view))
 			{
 				valid_cams[cam] = 1;
-				valid_cam_nums += 1;
+				posesnum_each_camera[cam] += 1;
 			}
 		}
 		station_info.push_back(valid_cams);
-		if (valid_cam_nums == Group_camera_num)
-			all_valid_station.push_back(i);
 	}
-	//Show station information matrix
-	for (int s = 0; s < station_info.size(); s++)
+
+	//Build pairs for solve  AX=BX problems.
+	map<pair<int,int>,vector<pair<int,int>>>main_and_slaves;//(main_cam_id,slave_cam_id)-->[main_cam_poseid,slave_cam_poseid]
+	map<pair<int, int>, Pose3> transforms;
+	for (int main_it = 0; main_it < Group_camera_num; main_it++)
 	{
-		for (int c = 0; c < Group_camera_num; c++)
-			std::cout << station_info[s][c];
-		std::cout << endl;
+		for (int slave_it = main_it + 1; slave_it < Group_camera_num; slave_it++)
+		{
+			vector<pair<int, int>> pose_pairs;
+			for (int i = 0; i < station_num; i++)
+			{
+				if (station_info[i][main_it] && station_info[i][slave_it])
+					pose_pairs.push_back(make_pair(main_it*station_num + i, slave_it*station_num + i));
+			}
+			main_and_slaves[make_pair(main_it, slave_it)] = pose_pairs;
+			pose_pairs.clear();
+		}
+	}
+
+	//solve
+	for(auto & transform_it:main_and_slaves)
+	{
+		//At least 2 pairs
+		Pose3 transformation = Pose3();
+		if (!Solve_AX_XB(transform_it.second, transformation))
+		{
+			std::cout << "Unable to solve the transformation between camera_" << transform_it.first.first << "and camera_" << transform_it.first.second << std::endl;
+			continue;
+		}
+		transforms[transform_it.first] = transformation;
+		std::cout << "Able to solve the transformation between camera_" << transform_it.first.first << "and camera_" << transform_it.first.second << std::endl;
 	}
 	
-	//Show how many station having all lens pose
-	std::cout << "all_valid_staion Num:" << all_valid_station.size() << std::endl;
+	//Assert the main cam with minimal sfm_data RMSE
+	for (int cam = 0; cam < Group_camera_num; cam++)
+		if (MCRMSEs[cam] < MCRMSEs[main_cam])
+			main_cam = cam;
+	std::cout << "We choose camera_" << main_cam << " as our main camera with minimal SfM RMSE:" << MCRMSEs[main_cam] << std::endl;
 	return true;
 }
 //bool CSFM::Initial_calibration(std::vector<Pose3>& relative_poses,int main_cam,int stations)
 //{
-//	//ÓÃÆ½¾ùÆ«ÒÆÁ¿×÷Îª±ê¶¨Öµ
+//	//ç”¨å¹³å‡åç§»é‡ä½œä¸ºæ ‡å®šå€¼
 //			std::vector<Vec3> cen_sum;
 //			cen_sum.resize(Group_camera_num, Vec3(0.0, 0.0, 0.0));
 //			std::vector<Vec4> quat_sum;
@@ -1552,16 +1634,16 @@ bool CSFM::Evaluate_InitialPoses()
 
 //bool CSFM::Evaluate_InitialPoses(int stations)
 //{
-//	//ÆßÄ¿¾µÍ·ÓĞĞ©Ó°Ïñ±ØÈ»»á¶ªÊ¸
-//	//ÓÃÆäËûÈ«¶¨Ïò³É¹¦µÄÕ¾À´ÍÆ²â¶ªÊ§Ó°ÏñµÄÎ»×Ë
+//	//ä¸ƒç›®é•œå¤´æœ‰äº›å½±åƒå¿…ç„¶ä¼šä¸¢çŸ¢
+//	//ç”¨å…¶ä»–å…¨å®šå‘æˆåŠŸçš„ç«™æ¥æ¨æµ‹ä¸¢å¤±å½±åƒçš„ä½å§¿
 //
-//	//Ïà¶Ô¹ØÏµ¾ØÕó
-//	//°´ÕÕ£¨i,j),i<j¹¹½¨ÉÏÈı½Ç¾ØÕó´æ´¢Æ½¾ùÖµ
+//	//ç›¸å¯¹å…³ç³»çŸ©é˜µ
+//	//æŒ‰ç…§ï¼ˆi,j),i<jæ„å»ºä¸Šä¸‰è§’çŸ©é˜µå­˜å‚¨å¹³å‡å€¼
 //	std::cout << ".........................Evaluating poses from known poses..................." << std::endl;
 //	std::map<std::pair<int, int>, std::vector<geometry::Pose3>> cam_cali_sum;
 //	std::map<std::pair<int, int>, geometry::Pose3> cam_cali;
 //
-//	//±éÀúÃ¿Ò»Õ¾
+//	//éå†æ¯ä¸€ç«™
 //	for (int s = 0; s < stations; s++)
 //	{
 //		for (int cam_i = 0; cam_i < Group_camera_num; cam_i++)
@@ -1598,7 +1680,7 @@ bool CSFM::Evaluate_InitialPoses()
 //			}
 //	}
 //	
-//	//ÔÙÕë¶ÔÃ¿Ò»¶Ô¹ØÏµÇóÆ½¾ù
+//	//å†é’ˆå¯¹æ¯ä¸€å¯¹å…³ç³»æ±‚å¹³å‡
 //	for (int cam_i = 0; cam_i < Group_camera_num; cam_i++)
 //		for (int cam_j = cam_i; cam_j < Group_camera_num; cam_j++)
 //		{
@@ -1606,11 +1688,11 @@ bool CSFM::Evaluate_InitialPoses()
 //				cam_cali[std::make_pair(cam_i, cam_j)] = Pose3();
 //			else
 //			{
-//				//Èç¹ûÈÎºÎÒ»¸öÏà¶Ô¹ØÏµÎª¿ÕÔò·µ»Øfalse
+//				//å¦‚æœä»»ä½•ä¸€ä¸ªç›¸å¯¹å…³ç³»ä¸ºç©ºåˆ™è¿”å›false
 //				if (cam_cali_sum[std::make_pair(cam_i, cam_j)].empty())
 //					return false;
 //
-//				//ÇóposesµÄÆ½¾ùÖµ
+//				//æ±‚posesçš„å¹³å‡å€¼
 //				Vec3 cen_sum=Vec3(0,0,0);
 //				Vec4 quat_sum= Vec4(0.0, 0.0, 0.0, 0.0);
 //				std::cout << "cam_cali_sum[(" << cam_i << "," << cam_j << ")].size()=" << cam_cali_sum[std::make_pair(cam_i, cam_j)].size() << std::endl;
@@ -1629,7 +1711,7 @@ bool CSFM::Evaluate_InitialPoses()
 //			}
 //		}
 //	
-//	//È»ºó±éÀúÃ»ÓĞposeµÄview£¬¹À¼ÆËüÃÇµÄÎ»×Ë
+//	//ç„¶åéå†æ²¡æœ‰poseçš„viewï¼Œä¼°è®¡å®ƒä»¬çš„ä½å§¿
 //	std::cout << "Get views without poses and give them evaluated average values............" <<std::endl;
 //	for (const auto & view_it : sfm_data.views)
 //	{
@@ -1683,8 +1765,8 @@ bool CSFM::Evaluate_InitialPoses()
 //		}
 //		if (evaluated_poses.size() < 1)
 //			return false;
-//		//È¡Æ½¾ùÖµ
-//		//ÇóposesµÄÆ½¾ùÖµ
+//		//å–å¹³å‡å€¼
+//		//æ±‚posesçš„å¹³å‡å€¼
 //		Vec3 pcen_sum = Vec3(0, 0, 0);
 //		Vec4 pquat_sum = Vec4(0.0, 0.0, 0.0, 0.0);
 //		for (int i = 0; i <evaluated_poses.size() ; i++)
@@ -2089,6 +2171,7 @@ int main()
 	sfm.ePairmode = PAIR_FOR_MULTICAMERAS;
 	sfm.b_use_motion_priors = false;
 	sfm.sImage_Describer_Method = "SIFT_GPU";
+	sfm.MCRMSEs.resize(sfm.Group_camera_num, 0);
 	sfm.groupSfM();
 	return getchar();
 }

@@ -172,6 +172,7 @@ public:
 	//globalSfM
 	int iRotationAveragingMethod = int(ROTATION_AVERAGING_L2);
 	int iTranslationAveragingMethod = int(TRANSLATION_AVERAGING_SOFTL1);
+	vector<double> MCRSMEs;
 	int globalMCSfM();
 
 	//incrementalSfM2
@@ -180,6 +181,7 @@ public:
 
 	//Eye-to-eye Calibration
 	bool Evaluate_InitialPoses();
+	bool Solve_AX_XB(vector<pair<int, int>>& pose_pairs, Pose3& transformation);
 	bool Initial_calibration(std::vector<Pose3>& relative_poses, int main_cam, int stations);
 	
 
